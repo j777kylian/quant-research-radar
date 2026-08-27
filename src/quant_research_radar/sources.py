@@ -195,16 +195,27 @@ class HyperliquidSource:
             )
         return records
 
-    def collect_history(self, limit: int, offline: bool = False) -> list[SourceRecord]:
+    def collect_history(
+        self,
+        limit: int,
+        offline: bool = False,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[SourceRecord]:
         if offline:
-            end = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+            end = end or datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
             return [
                 self._history_record(asset, end - timedelta(hours=i), i)
                 for asset in self.assets
                 for i in range(min(limit, 6))
+                if end - timedelta(hours=i)
+                >= (start or datetime.min.replace(tzinfo=UTC))
             ]
-        end_ms = int(datetime.now(UTC).timestamp() * 1000)
-        start_ms = end_ms - self.lookback_hours * 3600 * 1000
+        end = end or datetime.now(UTC)
+        end_ms = int(end.timestamp() * 1000)
+        start_ms = int(
+            (start or (end - timedelta(hours=self.lookback_hours))).timestamp() * 1000
+        )
         records: list[SourceRecord] = []
         for asset in self.assets:
             funding = self._post(
@@ -246,17 +257,27 @@ class HyperliquidSource:
         return records
 
     def collect_candles(
-        self, limit: int, interval: str = "1h", offline: bool = False
+        self,
+        limit: int,
+        interval: str = "1h",
+        offline: bool = False,
+        start: datetime | None = None,
+        end: datetime | None = None,
     ) -> list[SourceRecord]:
         if offline:
-            end = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+            end = end or datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
             return [
                 self._candle_record(asset, end - timedelta(hours=i), i)
                 for asset in self.assets
                 for i in range(min(limit, 30))
+                if end - timedelta(hours=i)
+                >= (start or datetime.min.replace(tzinfo=UTC))
             ]
-        end_ms = int(datetime.now(UTC).timestamp() * 1000)
-        start_ms = end_ms - max(limit, 2) * 3600 * 1000
+        end = end or datetime.now(UTC)
+        end_ms = int(end.timestamp() * 1000)
+        start_ms = int(
+            (start or (end - timedelta(hours=max(limit, 2)))).timestamp() * 1000
+        )
         records: list[SourceRecord] = []
         for asset in self.assets:
             rows = self._post(

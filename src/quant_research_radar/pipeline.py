@@ -323,17 +323,33 @@ def analyze(session: Session, client: LLMClient, limit: int = 20) -> int:
 
 
 def daily_report(
-    session: Session, output_dir: str, report_date: date | None = None
+    session: Session,
+    output_dir: str,
+    report_date: date | None = None,
+    as_of: datetime | None = None,
 ) -> Path:
     report_date = report_date or datetime.now(UTC).date()
+    as_of = as_of or utcnow()
     items = session.scalars(
-        select(SourceItem).order_by(SourceItem.created_at.desc()).limit(3)
+        select(SourceItem)
+        .where(
+            SourceItem.retrieved_at <= as_of,
+            (SourceItem.published_at.is_(None)) | (SourceItem.published_at <= as_of),
+        )
+        .order_by(SourceItem.created_at.desc())
+        .limit(3)
     ).all()
     hypotheses = session.scalars(
-        select(Hypothesis).order_by(Hypothesis.score.desc()).limit(3)
+        select(Hypothesis)
+        .where(Hypothesis.created_at <= as_of)
+        .order_by(Hypothesis.score.desc())
+        .limit(3)
     ).all()
     concepts = session.scalars(
-        select(Concept).order_by(Concept.last_seen_at.desc()).limit(2)
+        select(Concept)
+        .where(Concept.last_seen_at <= as_of)
+        .order_by(Concept.last_seen_at.desc())
+        .limit(2)
     ).all()
     lines = [f"# Daily Quant Radar — {report_date}", "", "## Market Observation", ""]
     market = [item for item in items if item.source_type == "MARKET"]

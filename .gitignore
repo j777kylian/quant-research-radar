@@ -21,6 +21,10 @@ htmlcov/
 
 # Generated outputs (reports, scratch)
 outputs/
+logs/
+data/phase16a-replay.db
+.phase16a-replay.lock
+
 
 # OS / editor
 .DS_Store
