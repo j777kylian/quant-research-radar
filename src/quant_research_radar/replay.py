@@ -36,11 +36,16 @@ def _as_utc(value: datetime) -> datetime:
     return normalize_utc(value)
 
 
+CANDLE_INTERVAL = timedelta(hours=1)
+
+
 def valuation_timestamp(cutoff: datetime) -> datetime:
     """Latest hourly candle open whose completed close is PIT-eligible."""
     cutoff = _as_utc(cutoff)
     boundary = cutoff.replace(minute=0, second=0, microsecond=0)
-    return boundary if cutoff > boundary else boundary - timedelta(hours=1)
+    return (
+        boundary - CANDLE_INTERVAL if cutoff < boundary + CANDLE_INTERVAL else boundary
+    )
 
 
 def parse_utc_timestamp(value: str, field_name: str) -> datetime:

@@ -94,7 +94,10 @@ def test_naive_and_aware_candle_timestamps_match_and_missing_counts_are_exact():
 
 def test_valuation_timestamp_is_pit_safe_and_eod_does_not_require_235959():
     cutoff = datetime(2026, 8, 26, 23, 59, 59, 999999, tzinfo=UTC)
-    assert valuation_timestamp(cutoff) == datetime(2026, 8, 26, 23, tzinfo=UTC)
+    assert valuation_timestamp(cutoff) == datetime(2026, 8, 26, 22, tzinfo=UTC)
+    assert valuation_timestamp(
+        datetime(2026, 8, 27, 10, 12, 18, tzinfo=UTC)
+    ) == datetime(2026, 8, 27, 9, tzinfo=UTC)
     assert valuation_timestamp(datetime(2026, 8, 26, 23, tzinfo=UTC)) == datetime(
         2026, 8, 26, 22, tzinfo=UTC
     )

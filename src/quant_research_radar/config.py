@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     arxiv_lookback_days: int = Field(default=14, ge=1, le=90)
     repec_max_items: int = Field(default=10, ge=1, le=100)
     hyperliquid_assets: list[str] = ["BTC", "ETH", "SOL"]
+    market_warmup_days: int = Field(default=33, ge=1, le=90)
+    live_bootstrap_overlap_hours: int = Field(default=2, ge=0, le=24)
     report_output_dir: str = "outputs"
 
 

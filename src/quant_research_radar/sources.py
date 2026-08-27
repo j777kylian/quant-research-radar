@@ -153,6 +153,7 @@ class RepecSource:
 
 class HyperliquidSource:
     name = "hyperliquid"
+    CANDLE_INTERVAL = timedelta(hours=1)
     endpoint = "https://api.hyperliquid.xyz/info"
     assets = ("BTC", "ETH", "SOL")
     FUNDING_PAGE_SIZE = 500
@@ -403,7 +404,10 @@ class HyperliquidSource:
                             "asset": asset,
                             "kind": "candle",
                             "interval": interval,
-                            "candle_close_timestamp": timestamp.isoformat(),
+                            "candle_open_timestamp": timestamp.isoformat(),
+                            "candle_close_timestamp": (
+                                timestamp + self.CANDLE_INTERVAL
+                            ).isoformat(),
                             "close": close,
                             "source_payload": row,
                         },
@@ -481,7 +485,10 @@ class HyperliquidSource:
                 "asset": asset,
                 "kind": "candle",
                 "interval": "1h",
-                "candle_close_timestamp": timestamp.isoformat(),
+                "candle_open_timestamp": timestamp.isoformat(),
+                "candle_close_timestamp": (
+                    timestamp + HyperliquidSource.CANDLE_INTERVAL
+                ).isoformat(),
                 "close": close,
                 "source_payload": row,
                 "fixture": True,

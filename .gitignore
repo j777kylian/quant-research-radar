@@ -23,6 +23,7 @@ htmlcov/
 outputs/
 logs/
 data/phase16a-replay.db
+data/phase16b-live-*.db
 .phase16a-replay.lock
 
 

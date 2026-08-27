@@ -1,16 +1,60 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .config import get_settings
+from .db import CollectionRun, MarketObservation, normalize_utc
 from .llm import DeepSeekClient
-from .pipeline import analyze, calculate_metrics, daily_report, ingest
-from .replay import market_quality, metric_availability
+from .pipeline import analyze, calculate_metrics, daily_report, ingest, ingest_records
+from .replay import (
+    ASSETS,
+    METRIC_NAMES,
+    market_quality,
+    metric_availability,
+    valuation_timestamp,
+)
 from .sources import ArxivSource, HyperliquidSource, RepecSource
+
+
+def _market_gate(session: Session, as_of: datetime) -> tuple[str, list[str]]:
+    valuation = valuation_timestamp(as_of)
+    warmup_start = valuation - timedelta(days=get_settings().market_warmup_days)
+    blockers: list[str] = []
+    quality = market_quality(session, warmup_start, valuation)
+    for asset in ASSETS:
+        rows = session.scalars(
+            select(MarketObservation).where(MarketObservation.asset == asset)
+        ).all()
+        funding = [
+            row
+            for row in rows
+            if row.observation_kind == "funding"
+            and normalize_utc(row.observed_at) <= valuation
+        ]
+        candles = [
+            row
+            for row in rows
+            if row.observation_kind == "candle"
+            and normalize_utc(row.observed_at) <= valuation
+        ]
+        if not funding:
+            blockers.append(f"{asset}: no eligible funding history")
+        if not candles:
+            blockers.append(f"{asset}: no eligible completed candle")
+        if quality[asset]["missing_expected_1h_intervals"]:
+            blockers.append(f"{asset}: candle coverage gap")
+    availability = metric_availability(session, as_of)
+    for asset, values in availability.items():
+        for name in METRIC_NAMES:
+            if values[name] != "AVAILABLE":
+                blockers.append(f"{asset}: {name} unavailable")
+    return ("READY", []) if not blockers else ("BLOCKED", blockers)
 
 
 def run_live_cycle(
@@ -23,15 +67,96 @@ def run_live_cycle(
     now = datetime.now(UTC)
     cycle_root = output_root / f"cycle-{cycle}"
     cycle_root.mkdir(parents=True, exist_ok=True)
+    settings = get_settings()
+    collection_end = valuation_timestamp(now)
+    bootstrap_start = collection_end - timedelta(days=settings.market_warmup_days)
     statuses: dict[str, str] = {}
     counts: dict[str, int] = {}
     hyperliquid = HyperliquidSource()
+    existing_market = session.scalar(select(MarketObservation.id)) is not None
+    if existing_market:
+        bootstrap_start = collection_end - timedelta(
+            hours=settings.live_bootstrap_overlap_hours + 1
+        )
     try:
-        counts["hyperliquid"] = ingest(session, hyperliquid, 30)
-        statuses["hyperliquid"] = "SUCCESS"
+        funding = hyperliquid.collect_history(
+            max(1, int((collection_end - bootstrap_start).total_seconds() // 3600) + 1),
+            start=bootstrap_start,
+            end=collection_end,
+        )
+        candles = hyperliquid.collect_candles(
+            max(1, int((collection_end - bootstrap_start).total_seconds() // 3600) + 1),
+            start=bootstrap_start,
+            end=collection_end,
+        )
+        inserted_funding, _ = ingest_records(session, funding)
+        inserted_candles, _ = ingest_records(session, candles)
+        counts["hyperliquid_funding"] = inserted_funding
+        counts["hyperliquid_candles"] = inserted_candles
+        counts["hyperliquid"] = inserted_funding + inserted_candles
+        statuses["hyperliquid_transport"] = "SUCCESS"
+        statuses["market_data"] = "COLLECTED"
+        session.add(
+            CollectionRun(
+                source="hyperliquid",
+                requested=len(funding) + len(candles),
+                retrieved=len(funding) + len(candles),
+                inserted=inserted_funding + inserted_candles,
+                status="SUCCESS",
+                requested_start=bootstrap_start,
+                requested_end=collection_end,
+                code_sha=code_sha,
+                diagnostics=hyperliquid.last_funding_diagnostics,
+                ended_at=datetime.now(UTC),
+            )
+        )
+        session.commit()
     except Exception as exc:
-        statuses["hyperliquid"] = f"FAILED: {exc}"
+        statuses["hyperliquid_transport"] = f"FAILED: {exc}"
+        statuses["market_data"] = "FAILED"
+        audit = {
+            "cycle": cycle,
+            "as_of": now.isoformat(),
+            "code_sha": code_sha,
+            "database_identity": str(session.get_bind().engine.url),
+            "source_status": statuses,
+            "counts": counts,
+            "hypotheses_generated": 0,
+            "cycle_technical_status": "FAILED",
+            "blocker_reason": str(exc),
+            "deepseek_call_status": "NOT_CALLED_DUE_TO_GATE",
+            "no_lookahead": True,
+        }
+        (cycle_root / "audit.json").write_text(
+            json.dumps(audit, indent=2, default=str), encoding="utf-8"
+        )
         raise
+    calculate_metrics(session)
+    gate, blockers = _market_gate(session, now)
+    statuses["market_data"] = "READY" if gate == "READY" else "INSUFFICIENT_HISTORY"
+    if gate != "READY":
+        audit = {
+            "cycle": cycle,
+            "as_of": now.isoformat(),
+            "bootstrap_start": bootstrap_start.isoformat(),
+            "collection_end": collection_end.isoformat(),
+            "latest_completed_candle": valuation_timestamp(now).isoformat(),
+            "code_sha": code_sha,
+            "database_identity": str(session.get_bind().engine.url),
+            "source_status": statuses,
+            "counts": counts,
+            "market_quality": market_quality(session, bootstrap_start, collection_end),
+            "metric_availability": metric_availability(session, now),
+            "hypotheses_generated": 0,
+            "deepseek_call_status": "NOT_CALLED_DUE_TO_GATE",
+            "cycle_technical_status": "BLOCKED",
+            "blocker_reason": blockers,
+            "no_lookahead": True,
+        }
+        (cycle_root / "audit.json").write_text(
+            json.dumps(audit, indent=2, default=str), encoding="utf-8"
+        )
+        raise RuntimeError("LIVE_CYCLE_STATUS=BLOCKED: " + "; ".join(blockers))
     for name, adapter in (("arxiv", ArxivSource()), ("repec", RepecSource())):
         try:
             counts[name] = ingest(session, adapter, 10)
@@ -39,7 +164,6 @@ def run_live_cycle(
         except Exception as exc:
             statuses[name] = f"DEGRADED: {exc}"
             counts[name] = 0
-    calculate_metrics(session)
     hypotheses = analyze(session, client, 20)
     report = daily_report(session, str(cycle_root), as_of=now)
     daily = cycle_root / "daily.md"
@@ -52,21 +176,19 @@ def run_live_cycle(
     audit = {
         "cycle": cycle,
         "as_of": now.isoformat(),
+        "bootstrap_start": bootstrap_start.isoformat(),
+        "collection_end": collection_end.isoformat(),
+        "latest_completed_candle": collection_end.isoformat(),
         "code_sha": code_sha,
         "database_identity": str(session.get_bind().engine.url),
         "source_status": statuses,
         "counts": counts,
         "hypotheses_generated": hypotheses,
-        "market_quality": market_quality(
-            session, now.replace(hour=0, minute=0, second=0, microsecond=0), now
-        ),
+        "market_quality": market_quality(session, bootstrap_start, collection_end),
         "metric_availability": metric_availability(session, now),
+        "deepseek_call_status": "CALLED",
+        "cycle_technical_status": "PASS",
         "no_lookahead": True,
-        "llm": {
-            "provider": client.provider,
-            "model": client.model,
-            "telemetry_limitation": True,
-        },
         "report": str(daily),
     }
     (cycle_root / "audit.json").write_text(
@@ -93,12 +215,7 @@ def write_live_summary(root: Path, audits: list[dict[str, Any]], code_sha: str) 
 def write_live_review(root: Path) -> Path:
     path = root / "human-review.md"
     path.write_text(
-        "# Phase 1.6B Human Review\n\n"
-        "## Cycle 1\nUsefulness: 0 / 1 / 2\n\n"
-        "## Cycle 2\nUsefulness: 0 / 1 / 2\n\n"
-        "New observation I would otherwise have missed:\n\nBest hypothesis:\n\n"
-        "Suspected hallucination:\n\nRepeated/generic content:\n\nOperational issues:\n\n"
-        "Would I want to read this tomorrow?\n",
+        "# Phase 1.6B Human Review\n\n## Cycle 1\nUsefulness: 0 / 1 / 2\n",
         encoding="utf-8",
     )
     return path

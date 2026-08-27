@@ -20,7 +20,10 @@ SHA="$(git rev-parse HEAD)"
 echo "LIVE_RUN_ID=$RUN_ID"
 echo "DATABASE=$DB"
 uv run quant-radar init-db
-uv run python -m quant_research_radar.cli live-cycle --database-url "$DB" --output-dir "$ROOT_OUT" --cycle 1 --code-sha "$SHA"
+if ! uv run python -m quant_research_radar.cli live-cycle --database-url "$DB" --output-dir "$ROOT_OUT" --cycle 1 --code-sha "$SHA"; then
+  echo "LIVE_CYCLE_STATUS=BLOCKED_OR_FAILED; not waiting for cycle 2" >&2
+  exit 1
+fi
 echo "Waiting 24 hours before cycle 2"
 sleep 86400
 uv run python -m quant_research_radar.cli live-cycle --database-url "$DB" --output-dir "$ROOT_OUT" --cycle 2 --code-sha "$SHA"
