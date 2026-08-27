@@ -9,10 +9,14 @@ from typing import cast
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import select
 
 from .config import get_settings
-from .db import CollectionRun, make_engine, make_session_factory
+from .db import (
+    CollectionRun,
+    get_phase16a_collection_run,
+    make_engine,
+    make_session_factory,
+)
 from .llm import DeepSeekClient, FakeLLMClient, ModelRouter
 from .pipeline import (
     analyze,
@@ -122,17 +126,13 @@ def main() -> None:
         migrate_database(database_url)
         engine = make_engine(database_url)
         session = make_session_factory(engine)()
-        diagnostics_run = session.scalar(
-            select(CollectionRun)
-            .where(
-                CollectionRun.source == "hyperliquid",
-                CollectionRun.phase16a_run_id == args.phase16a_run_id,
-                CollectionRun.requested_start == warmup_start,
-                CollectionRun.requested_end == cutoff,
-                CollectionRun.code_sha == args.code_sha,
-                CollectionRun.status == "SUCCESS",
-            )
-            .order_by(CollectionRun.started_at.desc())
+        diagnostics_run = get_phase16a_collection_run(
+            session,
+            source="hyperliquid",
+            phase16a_run_id=args.phase16a_run_id,
+            requested_start=warmup_start,
+            requested_end=cutoff,
+            code_sha=args.code_sha,
         )
         if diagnostics_run is None or not diagnostics_run.diagnostics:
             raise SystemExit(

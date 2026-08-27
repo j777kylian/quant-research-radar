@@ -48,17 +48,15 @@ uv run python - "$WARMUP_START" "$LATEST_REPLAY_CUTOFF" <<'PY'
 import sys
 from datetime import datetime, UTC
 from sqlalchemy import select
-from quant_research_radar.db import MarketObservation, make_engine, make_session_factory
+from quant_research_radar.db import get_phase16a_collection_run, make_engine, make_session_factory, normalize_utc
 from quant_research_radar.replay import ASSETS, funding_coverage
 from quant_research_radar.config import get_settings
 
-start = datetime.fromisoformat(sys.argv[1]).astimezone(UTC)
-end = datetime.fromisoformat(sys.argv[2]).astimezone(UTC)
+start = normalize_utc(datetime.fromisoformat(sys.argv[1]))
+end = normalize_utc(datetime.fromisoformat(sys.argv[2]))
 engine = make_engine("sqlite:///data/phase16a-replay.db")
 session = make_session_factory(engine)()
-from sqlalchemy import select
-from quant_research_radar.db import CollectionRun
-run = session.scalar(select(CollectionRun).where(CollectionRun.source == "hyperliquid", CollectionRun.phase16a_run_id == __import__("os").environ["PHASE16A_RUN_ID"], CollectionRun.requested_start == start, CollectionRun.requested_end == end, CollectionRun.code_sha == __import__("os").environ["PHASE16A_SHA"], CollectionRun.status == "SUCCESS"))
+run = get_phase16a_collection_run(session, source="hyperliquid", phase16a_run_id=__import__("os").environ["PHASE16A_RUN_ID"], requested_start=start, requested_end=end, code_sha=__import__("os").environ["PHASE16A_SHA"])
 if run is None or not run.diagnostics:
     raise SystemExit("BLOCKED: matching collection diagnostics are missing")
 coverage = funding_coverage(session, start, end, run.diagnostics)

@@ -16,9 +16,15 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    select,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+
+
+def normalize_utc(value: datetime) -> datetime:
+    """Represent a datetime as a timezone-aware UTC instant for comparisons."""
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def utcnow() -> datetime:
@@ -265,6 +271,38 @@ def make_engine(url: str) -> Engine:
 
 def make_session_factory(engine: Engine) -> sessionmaker[Session]:
     return sessionmaker(bind=engine, expire_on_commit=False)
+
+
+def get_phase16a_collection_run(
+    session: Session,
+    *,
+    source: str,
+    phase16a_run_id: str,
+    requested_start: datetime,
+    requested_end: datetime,
+    code_sha: str,
+    status: str = CollectionStatus.SUCCESS.value,
+) -> CollectionRun | None:
+    """Resolve exactly one Phase 1.6A collection run by explicit provenance."""
+    start = normalize_utc(requested_start)
+    end = normalize_utc(requested_end)
+    candidates = session.scalars(
+        select(CollectionRun).where(
+            CollectionRun.source == source,
+            CollectionRun.phase16a_run_id == phase16a_run_id,
+            CollectionRun.code_sha == code_sha,
+            CollectionRun.status == status,
+        )
+    ).all()
+    for run in candidates:
+        if (
+            run.requested_start is not None
+            and run.requested_end is not None
+            and normalize_utc(run.requested_start) == start
+            and normalize_utc(run.requested_end) == end
+        ):
+            return run
+    return None
 
 
 def init_db(engine: Engine) -> None:

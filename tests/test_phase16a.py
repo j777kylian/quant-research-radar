@@ -4,7 +4,11 @@ from pathlib import Path
 import pytest
 from sqlalchemy import create_engine, select
 
-from quant_research_radar.db import Base, CollectionRun
+from quant_research_radar.db import (
+    Base,
+    CollectionRun,
+    get_phase16a_collection_run,
+)
 from quant_research_radar.llm import FakeLLMClient
 from quant_research_radar.pipeline import ingest_records
 from quant_research_radar.replay import (
@@ -380,6 +384,95 @@ def test_explicit_run_binding_prevents_stale_and_same_interval_mixups():
     )
     assert selected is current
     assert not selected.diagnostics
+
+
+def test_phase16a_lookup_is_strict_and_timezone_normalized():
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    end = datetime(2026, 1, 1, 1, tzinfo=UTC)
+    db = session()
+    run = CollectionRun(
+        source="hyperliquid",
+        phase16a_run_id="run-a",
+        requested_start=start.replace(tzinfo=None),
+        requested_end=end.replace(tzinfo=None),
+        code_sha="sha-a",
+        status="SUCCESS",
+        diagnostics=diagnostics(),
+    )
+    db.add(run)
+    db.add(CollectionRun(source="arxiv", status="SUCCESS", diagnostics={}))
+    db.add(CollectionRun(source="repec", status="DEGRADED", diagnostics={}))
+    db.commit()
+    assert (
+        get_phase16a_collection_run(
+            db,
+            source="hyperliquid",
+            phase16a_run_id="run-a",
+            requested_start=start,
+            requested_end=end,
+            code_sha="sha-a",
+        )
+        is run
+    )
+    for _day in ("2026-01-01", "2026-01-02", "2026-01-03"):
+        assert (
+            get_phase16a_collection_run(
+                db,
+                source="hyperliquid",
+                phase16a_run_id="run-a",
+                requested_start=datetime.fromisoformat("2026-01-01T00:00:00+00:00"),
+                requested_end=datetime.fromisoformat("2026-01-01T01:00:00+00:00"),
+                code_sha="sha-a",
+            )
+            is run
+        )
+    assert (
+        get_phase16a_collection_run(
+            db,
+            source="hyperliquid",
+            phase16a_run_id="wrong",
+            requested_start=start,
+            requested_end=end,
+            code_sha="sha-a",
+        )
+        is None
+    )
+    assert (
+        get_phase16a_collection_run(
+            db,
+            source="hyperliquid",
+            phase16a_run_id="run-a",
+            requested_start=start,
+            requested_end=end,
+            code_sha="wrong",
+        )
+        is None
+    )
+    assert (
+        get_phase16a_collection_run(
+            db,
+            source="hyperliquid",
+            phase16a_run_id="run-a",
+            requested_start=start + timedelta(seconds=1),
+            requested_end=end,
+            code_sha="sha-a",
+        )
+        is None
+    )
+    assert (
+        get_phase16a_collection_run(
+            db,
+            source="hyperliquid",
+            phase16a_run_id="run-a",
+            requested_start=start,
+            requested_end=end,
+            code_sha="sha-a",
+            status="FAILED",
+        )
+        is None
+    )
+    run.diagnostics = {}
+    assert not run.diagnostics
 
 
 def test_replay_script_keeps_portable_provenance_conventions():
