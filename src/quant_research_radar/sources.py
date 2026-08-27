@@ -155,6 +155,10 @@ class HyperliquidSource:
     name = "hyperliquid"
     endpoint = "https://api.hyperliquid.xyz/info"
     assets = ("BTC", "ETH", "SOL")
+    FUNDING_PAGE_SIZE = 500
+    FUNDING_SAFETY_CAP = 1200
+    FUNDING_MAX_REQUESTS = 8
+    last_funding_diagnostics: dict[str, dict[str, Any]] = {}
 
     def __init__(self, client: httpx.Client | None = None, lookback_hours: int = 24):
         self.client = client or httpx.Client(timeout=20)
@@ -215,29 +219,115 @@ class HyperliquidSource:
         start = start or (end - timedelta(hours=self.lookback_hours))
         if start > end:
             raise ValueError("Hyperliquid history start must not be after end")
+        requested_cap = min(max(limit, 0), self.FUNDING_SAFETY_CAP)
+        if requested_cap == 0:
+            return []
         end_ms = int(end.timestamp() * 1000)
         start_ms = int(start.timestamp() * 1000)
         records: list[SourceRecord] = []
+        self.last_funding_diagnostics = {}
         for asset in self.assets:
-            funding = self._post(
-                {
-                    "type": "fundingHistory",
-                    "coin": asset,
-                    "startTime": start_ms,
-                    "endTime": end_ms,
-                }
-            )
-            for row in funding[:limit]:
-                if "coin" not in row or str(row["coin"]) != asset:
-                    continue
-                timestamp = _timestamp(row.get("time"))
+            cursor_ms = start_ms
+            request_count = 0
+            raw_record_count = 0
+            eligible_record_count = 0
+            duplicate_count = 0
+            malformed_count = 0
+            safety_cap_reached = False
+            termination_reason = "PROVIDER_EXHAUSTED"
+            seen_timestamps: set[int] = set()
+            seen_pages: set[tuple[int, ...]] = set()
+            asset_rows: dict[int, dict[str, Any]] = {}
+            for _request_number in range(self.FUNDING_MAX_REQUESTS):
+                request_count += 1
+                funding = self._post(
+                    {
+                        "type": "fundingHistory",
+                        "coin": asset,
+                        "startTime": cursor_ms,
+                        "endTime": end_ms,
+                    }
+                )
+                if not isinstance(funding, list):
+                    raise ValueError(f"Invalid Hyperliquid funding page for {asset}")
+                if not funding:
+                    termination_reason = "EMPTY_FINAL_PAGE"
+                    break
+                page_timestamps: list[int] = []
+                raw_record_count += len(funding)
+                for row in funding:
+                    if not isinstance(row, dict) or str(row.get("coin")) != asset:
+                        continue
+                    raw_time = row.get("time")
+                    try:
+                        if raw_time is None:
+                            raise ValueError("missing timestamp")
+                        timestamp_ms = int(raw_time)
+                    except (TypeError, ValueError) as exc:
+                        malformed_count += 1
+                        raise ValueError(
+                            f"Invalid Hyperliquid funding row for {asset}"
+                        ) from exc
+                    timestamp = _timestamp(raw_time)
+                    rate = _number(row.get("fundingRate"))
+                    if timestamp is None or rate is None:
+                        raise ValueError(f"Invalid Hyperliquid funding row for {asset}")
+                    if start <= timestamp <= end:
+                        if timestamp_ms in asset_rows:
+                            duplicate_count += 1
+                        else:
+                            eligible_record_count += 1
+                        asset_rows.setdefault(timestamp_ms, row)
+                    page_timestamps.append(timestamp_ms)
+                page_key = tuple(page_timestamps)
+                if page_key in seen_pages:
+                    raise ValueError(f"Duplicate Hyperliquid funding page for {asset}")
+                seen_pages.add(page_key)
+                final_ms = max(page_timestamps, default=None)
+                if final_ms is None:
+                    break
+                if final_ms in seen_timestamps or final_ms < cursor_ms:
+                    raise ValueError(
+                        f"Non-advancing Hyperliquid funding page for {asset}"
+                    )
+                seen_timestamps.add(final_ms)
+                if len(asset_rows) >= requested_cap:
+                    safety_cap_reached = True
+                    termination_reason = "SAFETY_CAP"
+                    break
+                if final_ms >= end_ms:
+                    termination_reason = "REACHED_END"
+                    break
+                if len(funding) < self.FUNDING_PAGE_SIZE:
+                    termination_reason = "PARTIAL_FINAL_PAGE"
+                    break
+                next_cursor = final_ms + 1
+                if next_cursor <= cursor_ms:
+                    raise ValueError(
+                        f"Non-advancing Hyperliquid funding cursor for {asset}"
+                    )
+                cursor_ms = next_cursor
+            else:
+                safety_cap_reached = True
+                termination_reason = "REQUEST_BOUND"
+                raise ValueError(
+                    f"Hyperliquid funding request bound reached for {asset}"
+                )
+            self.last_funding_diagnostics[asset] = {
+                "funding_request_count": request_count,
+                "raw_records_returned": raw_record_count,
+                "eligible_records": eligible_record_count,
+                "duplicate_records_removed": duplicate_count,
+                "malformed_records": malformed_count,
+                "safety_cap_reached": safety_cap_reached,
+                "pagination_termination_reason": termination_reason,
+            }
+            for timestamp_ms, row in sorted(asset_rows.items()):
+                if len(records) >= requested_cap * len(self.assets):
+                    break
+                timestamp = _timestamp(timestamp_ms)
                 rate = _number(row.get("fundingRate"))
-                if timestamp is None or rate is None:
-                    raise ValueError(f"Invalid Hyperliquid funding row for {asset}")
-                if str(row.get("coin", asset)) != asset:
-                    continue
-                if timestamp < start or timestamp > end:
-                    continue
+                assert timestamp is not None and rate is not None
                 records.append(
                     SourceRecord(
                         "MARKET",

@@ -15,6 +15,10 @@ from .pipeline import analyze, calculate_metrics, daily_report
 from .sources import SourceRecord
 
 ASSETS = ("BTC", "ETH", "SOL")
+EXPECTED_FUNDING_CADENCE = timedelta(hours=1)
+START_BOUNDARY_TOLERANCE = timedelta(minutes=1)
+END_BOUNDARY_TOLERANCE = EXPECTED_FUNDING_CADENCE + START_BOUNDARY_TOLERANCE
+
 METRIC_NAMES = (
     "funding_percentile",
     "return_1h",
@@ -33,7 +37,10 @@ def _as_utc(value: datetime) -> datetime:
 
 
 def funding_coverage(
-    session: Session, start: datetime, end: datetime
+    session: Session,
+    start: datetime,
+    end: datetime,
+    pagination_diagnostics: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for asset in ASSETS:
@@ -52,18 +59,64 @@ def funding_coverage(
         ]
         earliest = min((_as_utc(row.observed_at) for row in rows), default=None)
         latest = max((_as_utc(row.observed_at) for row in rows), default=None)
+        timestamps = sorted(_as_utc(row.observed_at) for row in rows)
+        intervals = [
+            timestamps[index + 1] - timestamps[index]
+            for index in range(len(timestamps) - 1)
+        ]
+        missing_interval_count = sum(
+            max(0, round(interval / EXPECTED_FUNDING_CADENCE) - 1)
+            for interval in intervals
+            if interval > EXPECTED_FUNDING_CADENCE
+        )
+        abnormal_gap_count = sum(
+            interval > EXPECTED_FUNDING_CADENCE + START_BOUNDARY_TOLERANCE
+            for interval in intervals
+        )
+        start_delta = earliest - start if earliest else None
+        end_delta = end - latest if latest else None
+        start_ok = bool(
+            start_delta is not None and start_delta <= START_BOUNDARY_TOLERANCE
+        )
+        end_ok = bool(end_delta is not None and end_delta <= END_BOUNDARY_TOLERANCE)
+        continuity_ok = abnormal_gap_count == 0
+        diagnostics = (pagination_diagnostics or {}).get(asset)
+        failure_reasons: list[str] = []
+        if diagnostics is None:
+            failure_reasons.append("COLLECTION_DIAGNOSTICS_MISSING")
+        if diagnostics and diagnostics.get("safety_cap_reached"):
+            failure_reasons.append("SAFETY_CAP_REACHED")
+        if not start_ok:
+            failure_reasons.append("START_BOUNDARY_NOT_COVERED")
+        if not end_ok:
+            failure_reasons.append("END_BOUNDARY_NOT_COVERED")
+        if not continuity_ok:
+            failure_reasons.append("INTERNAL_FUNDING_GAP")
         result[asset] = {
             "requested_start": start,
             "requested_end": end,
             "earliest_funding_timestamp": earliest,
             "latest_funding_timestamp": latest,
+            "start_boundary_delta": start_delta,
+            "end_boundary_delta": end_delta,
+            "expected_cadence": EXPECTED_FUNDING_CADENCE,
             "coverage_duration": (latest - earliest) if earliest and latest else None,
-            "required_warmup_satisfied": bool(
-                earliest is not None
-                and latest is not None
-                and earliest <= start
-                and latest <= end
-            ),
+            "eligible_record_count": len(timestamps),
+            "minimum_interval": min(intervals, default=None),
+            "maximum_interval": max(intervals, default=None),
+            "missing_interval_count": missing_interval_count,
+            "abnormal_gap_count": abnormal_gap_count,
+            "largest_gap": max(intervals, default=None),
+            "start_boundary_ok": start_ok,
+            "end_boundary_ok": end_ok,
+            "internal_continuity_ok": continuity_ok,
+            "required_warmup_satisfied": start_ok
+            and end_ok
+            and continuity_ok
+            and diagnostics is not None
+            and not (diagnostics and diagnostics.get("safety_cap_reached")),
+            "failure_reasons": failure_reasons,
+            "pagination": diagnostics or {},
         }
     return result
 
@@ -213,6 +266,7 @@ def run_replay_day(
     replay_day: date,
     warmup_start: datetime,
     code_sha: str,
+    pagination_diagnostics: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     cutoff = utc_day_cutoff(replay_day)
     day_root = output_root / replay_day.isoformat()
@@ -251,7 +305,7 @@ def run_replay_day(
         "eligible_source_item_count": len(before),
         "hypotheses_generated": created,
         "funding_coverage": _json_value(
-            funding_coverage(session, warmup_start, cutoff)
+            funding_coverage(session, warmup_start, cutoff, pagination_diagnostics)
         ),
         "market_quality": _json_value(market_quality(session, warmup_start, cutoff)),
         "metric_availability": metrics,
@@ -285,6 +339,9 @@ def write_summary(
     warmup_start: datetime,
     audits: list[dict[str, Any]],
     code_sha: str,
+    *,
+    phase16a_run_id: str | None = None,
+    requested_end: datetime | None = None,
 ) -> Path:
     summary = {
         "run_identity": {
@@ -293,6 +350,10 @@ def write_summary(
             "code_sha": code_sha,
             "replay_dates": [item.isoformat() for item in dates],
             "warmup_start": warmup_start.isoformat(),
+            "phase16a_run_id": phase16a_run_id,
+            "requested_start": warmup_start.isoformat(),
+            "requested_end": requested_end.isoformat() if requested_end else None,
+            "collection_run_id": phase16a_run_id,
         },
         "source_status": {
             "arxiv": "PARTIAL_HISTORICAL_COVERAGE",

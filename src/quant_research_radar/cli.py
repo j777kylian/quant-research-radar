@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
+from sqlalchemy import select
+
 from .config import get_settings
-from .db import init_db, make_engine, make_session_factory
+from .db import CollectionRun, init_db, make_engine, make_session_factory
 from .llm import DeepSeekClient, FakeLLMClient, ModelRouter
 from .pipeline import (
     analyze,
@@ -17,7 +20,7 @@ from .pipeline import (
     ingest_records,
     weekly_report,
 )
-from .replay import run_replay_day
+from .replay import funding_coverage, run_replay_day
 from .sources import ArxivSource, HyperliquidSource, RepecSource, SourceAdapter
 
 
@@ -32,6 +35,7 @@ def main() -> None:
     collect.add_argument("--history", action="store_true")
     collect.add_argument("--start", type=datetime.fromisoformat, default=None)
     collect.add_argument("--end", type=datetime.fromisoformat, default=None)
+    collect.add_argument("--phase16a-run-id", default=None)
     analysis = sub.add_parser("analyze")
     analysis.add_argument("--limit", type=int, default=20)
     sub.add_parser("run-daily").add_argument("--offline", action="store_true")
@@ -55,6 +59,8 @@ def main() -> None:
     replay.add_argument("--provider", choices=["fake", "deepseek"], default=None)
     replay.add_argument("--warmup-start", type=datetime.fromisoformat, default=None)
     replay.add_argument("--code-sha", default="unknown")
+    replay.add_argument("--coverage-only", action="store_true")
+    replay.add_argument("--phase16a-run-id", default=None)
     args = parser.parse_args()
     settings = get_settings()
     if args.command == "replay":
@@ -80,6 +86,32 @@ def main() -> None:
         engine = make_engine(database_url)
         init_db(engine)
         session = make_session_factory(engine)()
+        diagnostics_run = session.scalar(
+            select(CollectionRun)
+            .where(
+                CollectionRun.source == "hyperliquid",
+                CollectionRun.phase16a_run_id == args.phase16a_run_id,
+                CollectionRun.requested_start == warmup_start,
+                CollectionRun.requested_end == cutoff,
+                CollectionRun.code_sha == args.code_sha,
+                CollectionRun.status == "SUCCESS",
+            )
+            .order_by(CollectionRun.started_at.desc())
+        )
+        if diagnostics_run is None or not diagnostics_run.diagnostics:
+            raise SystemExit(
+                "BLOCKED: matching Hyperliquid funding diagnostics are missing"
+            )
+        coverage = funding_coverage(
+            session, warmup_start, cutoff, diagnostics_run.diagnostics
+        )
+        print(json.dumps(coverage, indent=2, default=str))
+        if args.coverage_only:
+            if not all(item["required_warmup_satisfied"] for item in coverage.values()):
+                raise SystemExit(
+                    "PARTIAL: required bounded funding warm-up is unavailable"
+                )
+            return
         audit = run_replay_day(
             session,
             replay_client,
@@ -87,6 +119,7 @@ def main() -> None:
             args.date,
             warmup_start,
             args.code_sha,
+            pagination_diagnostics=diagnostics_run.diagnostics,
         )
         print(json.dumps(audit, indent=2, default=str))
         return
@@ -194,12 +227,27 @@ def main() -> None:
         adapter = cast("SourceAdapter", adapters[args.source])
         if args.history and args.source == "hyperliquid":
             source = cast(HyperliquidSource, adapter)
-            inserted, duplicates = ingest_records(
-                session,
-                source.collect_history(
-                    limit, offline=args.offline, start=args.start, end=args.end
-                ),
+            history_records = source.collect_history(
+                limit, offline=args.offline, start=args.start, end=args.end
             )
+            inserted, duplicates = ingest_records(session, history_records)
+            run = CollectionRun(
+                source="hyperliquid",
+                requested=limit,
+                retrieved=len(history_records),
+                inserted=inserted,
+                skipped_duplicates=duplicates,
+                status="SUCCESS",
+                requested_start=args.start,
+                requested_end=args.end,
+                code_sha=os.environ.get("PHASE16A_SHA", "unknown"),
+                phase16a_run_id=args.phase16a_run_id
+                or os.environ.get("PHASE16A_RUN_ID"),
+                diagnostics=source.last_funding_diagnostics,
+                ended_at=datetime.now(UTC),
+            )
+            session.add(run)
+            session.commit()
             inserted_candles, candle_duplicates = ingest_records(
                 session,
                 source.collect_candles(

@@ -25,13 +25,30 @@ from .sources import SourceAdapter, SourceRecord
 
 
 def ingest(
-    session: Session, adapter: SourceAdapter, limit: int, offline: bool = False
+    session: Session,
+    adapter: SourceAdapter,
+    limit: int,
+    offline: bool = False,
+    *,
+    requested_start: datetime | None = None,
+    requested_end: datetime | None = None,
+    code_sha: str | None = None,
 ) -> int:
-    run = CollectionRun(source=adapter.name, requested=limit, started_at=utcnow())
+    run = CollectionRun(
+        source=adapter.name,
+        requested=limit,
+        started_at=utcnow(),
+        requested_start=requested_start,
+        requested_end=requested_end,
+        code_sha=code_sha,
+    )
     session.add(run)
     session.flush()
     try:
         records = adapter.collect(limit, offline)
+        diagnostics = getattr(adapter, "last_funding_diagnostics", None)
+        if diagnostics:
+            run.diagnostics = diagnostics
         run.retrieved = len(records)
         inserted = 0
         for record in records:
@@ -84,6 +101,9 @@ def ingest(
             error_reason=str(exc),
             started_at=utcnow(),
             ended_at=utcnow(),
+            requested_start=requested_start,
+            requested_end=requested_end,
+            code_sha=code_sha,
         )
         session.add(run)
         session.commit()

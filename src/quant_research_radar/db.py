@@ -223,6 +223,11 @@ class CollectionRun(Base):
         String(20), default=CollectionStatus.SUCCESS.value
     )
     error_reason: Mapped[str | None] = mapped_column(Text)
+    requested_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    requested_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    code_sha: Mapped[str | None] = mapped_column(String(64))
+    diagnostics: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    phase16a_run_id: Mapped[str | None] = mapped_column(String(100), index=True)
 
 
 class AnalysisRun(Base):
