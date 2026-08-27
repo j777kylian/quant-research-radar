@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "quant-research-radar"
+version = "0.1.0"
+description = "A research and learning system for a beginner quantitative researcher: collects public research and market data, extracts claims, forms falsifiable hypotheses, and teaches the concepts to understand them. Not a trading bot."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "alembic>=1.13",
+    "httpx>=0.27",
+    "psycopg[binary]>=3.1",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "sqlalchemy>=2.0,<2.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.10",
+    "pytest>=8.0",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+quant-radar = "quant_research_radar.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/j777kylian/quant-research-radar"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/quant_research_radar"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+plugins = ["sqlalchemy.ext.mypy.plugin"]
+strict = true
+exclude = ["tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
