@@ -82,7 +82,7 @@ uv run python - <<'PY'
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from quant_research_radar.replay import replay_dates, write_summary
+from quant_research_radar.replay import parse_utc_timestamp, replay_dates, write_summary
 from quant_research_radar.db import make_engine, make_session_factory
 from quant_research_radar.config import get_settings
 
@@ -91,7 +91,9 @@ dates = replay_dates(datetime.now(UTC))
 audits = [json.loads((root / day.isoformat() / "audit.json").read_text()) for day in dates]
 import os
 
-summary = write_summary(root, datetime.now(UTC), datetime.now(UTC), dates, datetime.now(UTC), audits, os.environ["PHASE16A_SHA"], phase16a_run_id=os.environ["PHASE16A_RUN_ID"], requested_end=os.environ.get("PHASE16A_END"))
+requested_end = parse_utc_timestamp(os.environ["PHASE16A_END"], "PHASE16A_END")
+warmup_start = parse_utc_timestamp(audits[0]["warmup_start"], "warmup_start")
+summary = write_summary(root, datetime.now(UTC), datetime.now(UTC), dates, warmup_start, audits, os.environ["PHASE16A_SHA"], phase16a_run_id=os.environ["PHASE16A_RUN_ID"], requested_end=requested_end)
 print(f"SUMMARY={summary}")
 PY
 

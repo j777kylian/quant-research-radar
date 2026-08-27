@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import cast
@@ -26,7 +27,12 @@ from .pipeline import (
     ingest_records,
     weekly_report,
 )
-from .replay import funding_coverage, run_replay_day
+from .replay import (
+    funding_coverage,
+    parse_utc_timestamp,
+    run_replay_day,
+    write_summary,
+)
 from .sources import ArxivSource, HyperliquidSource, RepecSource, SourceAdapter
 
 
@@ -107,8 +113,100 @@ def main() -> None:
     replay.add_argument("--code-sha", default="unknown")
     replay.add_argument("--coverage-only", action="store_true")
     replay.add_argument("--phase16a-run-id", default=None)
+    live_parser = sub.add_parser("live-cycle")
+    live_parser.add_argument("--output-dir", required=True)
+    live_parser.add_argument("--cycle", type=int, required=True)
+    live_parser.add_argument("--database-url", required=True)
+    live_parser.add_argument("--code-sha", required=True)
+    summary = sub.add_parser("rebuild-phase16a-summary")
+    summary.add_argument("--output-dir", default="outputs/replay")
+    summary.add_argument("--phase16a-run-id", default=None)
+    summary.add_argument(
+        "--requested-end",
+        type=lambda value: parse_utc_timestamp(value, "requested_end"),
+        default=None,
+    )
+    summary.add_argument(
+        "--warmup-start",
+        type=lambda value: parse_utc_timestamp(value, "warmup_start"),
+        default=None,
+    )
+    summary.add_argument("--code-sha", default="unknown")
+    summary.add_argument("--collection-code-sha", required=True)
+    summary.add_argument("--replay-code-sha", required=True)
+    summary.add_argument(
+        "--collection-end",
+        required=True,
+        type=lambda value: parse_utc_timestamp(value, "collection_end"),
+    )
+    summary.add_argument(
+        "--collection-start",
+        required=False,
+        type=lambda value: parse_utc_timestamp(value, "collection_start"),
+    )
     args = parser.parse_args()
     settings = get_settings()
+    if args.command == "live-cycle":
+        if not settings.deepseek_api_key:
+            raise SystemExit("DEEPSEEK_API_KEY is required for live cycle")
+        from .live import run_live_cycle
+
+        engine = make_engine(args.database_url)
+        session = make_session_factory(engine)()
+        client = DeepSeekClient(
+            settings.deepseek_api_key,
+            ModelRouter(settings.llm_flash_model, settings.llm_pro_model),
+            settings.deepseek_base_url,
+            settings.llm_timeout_seconds,
+            settings.http_retries,
+        )
+        print(
+            json.dumps(
+                run_live_cycle(
+                    session, client, Path(args.output_dir), args.cycle, args.code_sha
+                ),
+                default=str,
+            )
+        )
+        return
+    if args.command == "rebuild-phase16a-summary":
+        root = Path(args.output_dir)
+        dates = sorted(
+            path.name
+            for path in root.iterdir()
+            if path.is_dir() and re.match(r"^\d{4}-\d{2}-\d{2}$", path.name)
+        )
+        replay_days = [date.fromisoformat(item) for item in dates]
+        if not replay_days:
+            raise SystemExit("BLOCKED: no replay-day directories found")
+        audits = [
+            json.loads((root / day.isoformat() / "audit.json").read_text())
+            for day in replay_days
+        ]
+        requested_end = args.requested_end
+        if requested_end is None:
+            raise SystemExit("BLOCKED: --requested-end is required")
+        warmup_start = args.warmup_start
+        if warmup_start is None:
+            warmup_start = parse_utc_timestamp(
+                str(audits[0]["warmup_start"]), "warmup_start"
+            )
+        path = write_summary(
+            root,
+            datetime.now(UTC),
+            datetime.now(UTC),
+            replay_days,
+            warmup_start,
+            audits,
+            args.replay_code_sha,
+            phase16a_run_id=args.phase16a_run_id,
+            requested_end=requested_end,
+            collection_code_sha=args.collection_code_sha,
+            collection_start=args.collection_start,
+            collection_end=args.collection_end,
+        )
+        print(f"SUMMARY={path}")
+        return
     if args.command == "replay":
         from .llm import FakeLLMClient
 

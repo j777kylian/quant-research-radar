@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -14,8 +15,12 @@ from quant_research_radar.pipeline import ingest_records
 from quant_research_radar.replay import (
     filter_records_as_of,
     funding_coverage,
+    market_quality,
+    parse_utc_timestamp,
     run_replay_day,
     utc_day_cutoff,
+    valuation_timestamp,
+    write_summary,
 )
 from quant_research_radar.sources import HyperliquidSource, SourceRecord
 
@@ -54,6 +59,45 @@ def diagnostics(cap=False):
         }
         for asset in ("BTC", "ETH", "SOL")
     }
+
+
+def test_naive_and_aware_candle_timestamps_match_and_missing_counts_are_exact():
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    end = start + timedelta(hours=23)
+    db = session()
+    records = [
+        HyperliquidSource._candle_record("BTC", start + timedelta(hours=i), i)
+        for i in range(24)
+    ]
+    records[0] = SourceRecord(
+        records[0].source_type,
+        records[0].source_name,
+        records[0].external_id,
+        records[0].title,
+        records[0].canonical_url,
+        records[0].authors,
+        start.replace(tzinfo=None),
+        records[0].raw_text,
+        records[0].raw_metadata,
+    )
+    ingest_records(db, records)
+    assert market_quality(db, start, end)["BTC"]["missing_expected_1h_intervals"] == 0
+    db2 = session()
+    db2_records = [
+        HyperliquidSource._candle_record("BTC", start + timedelta(hours=i), i)
+        for i in range(24)
+        if i != 7
+    ]
+    ingest_records(db2, db2_records)
+    assert market_quality(db2, start, end)["BTC"]["missing_expected_1h_intervals"] == 1
+
+
+def test_valuation_timestamp_is_pit_safe_and_eod_does_not_require_235959():
+    cutoff = datetime(2026, 8, 26, 23, 59, 59, 999999, tzinfo=UTC)
+    assert valuation_timestamp(cutoff) == datetime(2026, 8, 26, 23, tzinfo=UTC)
+    assert valuation_timestamp(datetime(2026, 8, 26, 23, tzinfo=UTC)) == datetime(
+        2026, 8, 26, 22, tzinfo=UTC
+    )
 
 
 def test_replay_future_exclusion_for_market_and_papers() -> None:
@@ -516,6 +560,36 @@ def test_collection_window_end_is_separate_from_replay_cutoff():
         )
         is None
     )
+
+
+def test_summary_timestamp_boundary_and_serialization(tmp_path: Path):
+    requested_end = parse_utc_timestamp("2026-08-26T23:59:59.999999Z", "PHASE16A_END")
+    assert requested_end == datetime(2026, 8, 26, 23, 59, 59, 999999, tzinfo=UTC)
+    audit = {
+        "replay_date": "2026-08-26",
+        "warmup_start": "2026-07-22T00:00:00+00:00",
+        "market_quality": {},
+        "metric_availability": {},
+        "hypotheses_generated": 0,
+    }
+    path = write_summary(
+        tmp_path,
+        requested_end,
+        requested_end,
+        [datetime(2026, 8, 26, tzinfo=UTC).date()],
+        parse_utc_timestamp(audit["warmup_start"], "warmup_start"),
+        [audit],
+        "sha",
+        requested_end=requested_end,
+    )
+    payload = json.loads(path.read_text())
+    assert payload["run_identity"]["requested_end"] == requested_end.isoformat()
+    assert payload["run_identity"]["requested_start"] == audit["warmup_start"]
+
+
+def test_summary_timestamp_malformed_fails_clearly():
+    with pytest.raises(ValueError, match="PHASE16A_END.*ISO-8601"):
+        parse_utc_timestamp("not-a-timestamp", "PHASE16A_END")
 
 
 def test_replay_script_keeps_two_clock_provenance_wiring():

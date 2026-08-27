@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .db import Hypothesis, MarketMetric, MarketObservation, SourceItem
+from .db import Hypothesis, MarketMetric, MarketObservation, SourceItem, normalize_utc
 from .llm import LLMClient
 from .pipeline import analyze, calculate_metrics, daily_report
 from .sources import SourceRecord
@@ -33,7 +33,24 @@ def utc_day_cutoff(day: date) -> datetime:
 
 
 def _as_utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    return normalize_utc(value)
+
+
+def valuation_timestamp(cutoff: datetime) -> datetime:
+    """Latest hourly candle open whose completed close is PIT-eligible."""
+    cutoff = _as_utc(cutoff)
+    boundary = cutoff.replace(minute=0, second=0, microsecond=0)
+    return boundary if cutoff > boundary else boundary - timedelta(hours=1)
+
+
+def parse_utc_timestamp(value: str, field_name: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{field_name} must be a valid ISO-8601 timestamp: {value!r}"
+        ) from exc
+    return _as_utc(parsed)
 
 
 def funding_coverage(
@@ -179,22 +196,27 @@ def market_quality(
     for asset in ASSETS:
         rows = session.scalars(
             select(MarketObservation)
-            .where(
-                MarketObservation.asset == asset,
-                MarketObservation.observed_at >= start,
-                MarketObservation.observed_at <= end,
-            )
+            .where(MarketObservation.asset == asset)
             .order_by(MarketObservation.observed_at)
         ).all()
+        normalized_start = _as_utc(start)
+        normalized_end = _as_utc(end)
+        rows = [
+            row
+            for row in rows
+            if normalized_start <= _as_utc(row.observed_at) <= normalized_end
+        ]
         funding = [row for row in rows if row.observation_kind == "funding"]
         candles = [row for row in rows if row.observation_kind == "candle"]
-        candle_times = [row.observed_at for row in candles]
-        expected = 1 + int((end - start).total_seconds() // 3600)
+        candle_times = [_as_utc(row.observed_at) for row in candles]
+        normalized_start = _as_utc(start)
+        normalized_end = _as_utc(end)
+        expected = 1 + int((normalized_end - normalized_start).total_seconds() // 3600)
         candle_set = set(candle_times)
         missing = [
-            (start + timedelta(hours=i)).isoformat()
+            (normalized_start + timedelta(hours=i)).isoformat()
             for i in range(expected)
-            if start + timedelta(hours=i) not in candle_set
+            if normalized_start + timedelta(hours=i) not in candle_set
         ]
         result[asset] = {
             "funding_count": len(funding),
@@ -226,14 +248,24 @@ def _json_value(value: Any) -> Any:
 
 def metric_availability(
     session: Session, cutoff: datetime
-) -> dict[str, dict[str, str]]:
-    result: dict[str, dict[str, str]] = {}
-    rows = session.scalars(
-        select(MarketObservation).where(MarketObservation.observed_at <= cutoff)
-    ).all()
+) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    cutoff = _as_utc(cutoff)
+    valuation = valuation_timestamp(cutoff)
+    rows = session.scalars(select(MarketObservation)).all()
     for asset in ASSETS:
-        observations = [row for row in rows if row.asset == asset]
-        latest = max(observations, key=lambda row: row.observed_at, default=None)
+        observations = [
+            row
+            for row in rows
+            if row.asset == asset
+            and _as_utc(row.observed_at) <= valuation
+            and row.observation_kind in ("candle", "snapshot", "funding")
+        ]
+        latest = max(
+            (row for row in observations if row.observation_kind == "candle"),
+            key=lambda row: _as_utc(row.observed_at),
+            default=None,
+        )
         metrics = (
             session.scalars(
                 select(MarketMetric).where(MarketMetric.observation_id == latest.id)
@@ -243,8 +275,12 @@ def metric_availability(
         )
         values = {metric.metric_name: metric.metric_value for metric in metrics}
         result[asset] = {
-            name: "AVAILABLE" if name in values else "UNAVAILABLE"
-            for name in METRIC_NAMES
+            **{
+                name: "AVAILABLE" if name in values else "UNAVAILABLE"
+                for name in METRIC_NAMES
+            },
+            "valuation_timestamp": valuation,
+            "valuation_candle_timestamp": latest.observed_at if latest else None,
         }
     return result
 
@@ -267,6 +303,11 @@ def run_replay_day(
     warmup_start: datetime,
     code_sha: str,
     pagination_diagnostics: dict[str, dict[str, Any]] | None = None,
+    *,
+    collection_run_id: str | None = None,
+    collection_code_sha: str | None = None,
+    collection_start: datetime | None = None,
+    collection_end: datetime | None = None,
 ) -> dict[str, Any]:
     cutoff = utc_day_cutoff(replay_day)
     day_root = output_root / replay_day.isoformat()
@@ -303,13 +344,20 @@ def run_replay_day(
         "cutoff_utc": cutoff.isoformat(),
         "warmup_start": warmup_start.isoformat(),
         "code_sha": code_sha,
+        "replay_code_sha": code_sha,
+        "collection_code_sha": collection_code_sha,
+        "phase16a_run_id": collection_run_id,
+        "collection_run_id": collection_run_id,
+        "collection_start": _json_value(collection_start),
+        "collection_end": _json_value(collection_end),
+        "replay_cutoff": cutoff.isoformat(),
         "eligible_source_item_count": len(before),
         "hypotheses_generated": created,
         "funding_coverage": _json_value(
             funding_coverage(session, warmup_start, cutoff, pagination_diagnostics)
         ),
         "market_quality": _json_value(market_quality(session, warmup_start, cutoff)),
-        "metric_availability": metrics,
+        "metric_availability": _json_value(metrics),
         "source_status": {
             "arxiv": "PARTIAL_HISTORICAL_COVERAGE",
             "repec": "DEGRADED",
@@ -343,13 +391,46 @@ def write_summary(
     *,
     phase16a_run_id: str | None = None,
     requested_end: datetime | None = None,
+    collection_code_sha: str | None = None,
+    replay_code_sha: str | None = None,
+    collection_start: datetime | None = None,
+    collection_end: datetime | None = None,
 ) -> Path:
+    started_at = _as_utc(started_at)
+    finished_at = _as_utc(finished_at)
+    warmup_start = _as_utc(warmup_start)
+    requested_end = _as_utc(requested_end) if requested_end is not None else None
+    structural_warnings: list[str] = []
+    for audit in audits:
+        for asset, quality in audit["market_quality"].items():
+            if (
+                quality["candle_count"] > 0
+                and quality["missing_expected_1h_intervals"] >= quality["candle_count"]
+            ):
+                structural_warnings.append(
+                    f"{audit['replay_date']} {asset}: candle audit classifies complete-looking data as missing"
+                )
+    all_returns_unavailable = all(
+        audit["metric_availability"].get(asset, {}).get(name) == "UNAVAILABLE"
+        for audit in audits
+        for asset in ASSETS
+        for name in ("return_1h", "return_4h", "return_24h")
+    )
+    if all_returns_unavailable:
+        structural_warnings.append(
+            "All required return horizons are unavailable across replay assets/days"
+        )
+
     summary = {
         "run_identity": {
             "started_at": started_at.isoformat(),
             "finished_at": finished_at.isoformat(),
             "code_sha": code_sha,
+            "replay_code_sha": replay_code_sha or code_sha,
+            "collection_code_sha": collection_code_sha,
             "replay_dates": [item.isoformat() for item in dates],
+            "collection_start": _json_value(collection_start),
+            "collection_end": _json_value(collection_end),
             "warmup_start": warmup_start.isoformat(),
             "phase16a_run_id": phase16a_run_id,
             "requested_start": warmup_start.isoformat(),
@@ -389,7 +470,13 @@ def write_summary(
         "reasons": [
             "RePEc is degraded and arXiv historical completeness cannot be proven.",
             "Existing LLM client does not expose per-call telemetry.",
+            *structural_warnings,
         ],
+        "research_utility_warnings": [
+            "Zero hypotheses generated; this may be a legitimate research outcome, but utility is limited for this replay."
+        ]
+        if sum(int(audit["hypotheses_generated"]) for audit in audits) == 0
+        else [],
         "historical_semantics": "Persisted evidence is retained, while each replay selects source publication/retrieval timestamps at or before its explicit cutoff. No future market data is used by the replay view.",
     }
     path = output_root / "phase16a-summary.json"

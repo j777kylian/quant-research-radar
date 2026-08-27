@@ -199,7 +199,7 @@ def calculate_metrics(
         prices = {
             r.observed_at: r.mark_price
             for r in rows
-            if r.mark_price is not None and r.observation_kind in ("candle", "snapshot")
+            if r.mark_price is not None and r.observation_kind == "candle"
         }
         for row in rows:
             values = {
