@@ -475,8 +475,53 @@ def test_phase16a_lookup_is_strict_and_timezone_normalized():
     assert not run.diagnostics
 
 
-def test_replay_script_keeps_portable_provenance_conventions():
+def test_collection_window_end_is_separate_from_replay_cutoff():
+    start = datetime(2026, 7, 22, tzinfo=UTC)
+    day1 = utc_day_cutoff(datetime(2026, 8, 24, tzinfo=UTC).date())
+    day2 = utc_day_cutoff(datetime(2026, 8, 25, tzinfo=UTC).date())
+    day3 = utc_day_cutoff(datetime(2026, 8, 26, tzinfo=UTC).date())
+    db = session()
+    run = CollectionRun(
+        source="hyperliquid",
+        phase16a_run_id="shared",
+        requested_start=start,
+        requested_end=day3,
+        code_sha="sha",
+        status="SUCCESS",
+        diagnostics=diagnostics(),
+    )
+    db.add(run)
+    db.commit()
+    for replay_cutoff in (day1, day2, day3):
+        assert (
+            get_phase16a_collection_run(
+                db,
+                source="hyperliquid",
+                phase16a_run_id="shared",
+                requested_start=start,
+                requested_end=day3,
+                code_sha="sha",
+            )
+            is run
+        )
+        assert replay_cutoff <= day3
+    assert (
+        get_phase16a_collection_run(
+            db,
+            source="hyperliquid",
+            phase16a_run_id="shared",
+            requested_start=start,
+            requested_end=day1,
+            code_sha="sha",
+        )
+        is None
+    )
+
+
+def test_replay_script_keeps_two_clock_provenance_wiring():
     script = Path("scripts/run_phase16a_replay.sh").read_text()
     assert "mapfile" not in script
     assert '"${SHA}"' not in script
     assert 'os.environ["PHASE16A_SHA"]' in script
+    assert script.count('--collection-end "$LATEST_REPLAY_CUTOFF"') == 2
+    assert '--as-of "$CUTOFF" --collection-end "$LATEST_REPLAY_CUTOFF"' in script

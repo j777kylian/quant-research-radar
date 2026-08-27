@@ -272,7 +272,8 @@ def run_replay_day(
     day_root = output_root / replay_day.isoformat()
     day_root.mkdir(parents=True, exist_ok=True)
     calculate_metrics(session)
-    # Remove future academic and market rows from the research view without deleting persisted evidence.
+    # Research clock: exclude persisted evidence after this day's PIT cutoff;
+    # the collection clock may extend through a later collection_end.
     eligible_items = session.scalars(
         select(SourceItem)
         .where(
@@ -288,7 +289,7 @@ def run_replay_day(
         if eligible_items
         else 0
     )
-    report = daily_report(session, str(day_root), replay_day)
+    report = daily_report(session, str(day_root), replay_day, as_of=cutoff)
     report_text = report.read_text(encoding="utf-8")
     (day_root / "daily.md").write_text(
         f"# Daily Quant Radar — Historical Replay — {replay_day}\n\n"

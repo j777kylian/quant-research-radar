@@ -43,7 +43,7 @@ LATEST_REPLAY_CUTOFF="$(uv run python -c 'from quant_research_radar.replay impor
 export PHASE16A_END="$LATEST_REPLAY_CUTOFF"
 uv run quant-radar init-db
 uv run quant-radar collect hyperliquid --history --limit 1200 --start "$WARMUP_START" --end "$LATEST_REPLAY_CUTOFF" --phase16a-run-id "$RUN_ID"
-uv run quant-radar replay --date "$(date -u +%Y-%m-%d)" --as-of "$LATEST_REPLAY_CUTOFF" --provider fake --output-dir outputs/replay --warmup-start "$WARMUP_START" --code-sha "$SHA" --phase16a-run-id "$RUN_ID" --coverage-only
+uv run quant-radar replay --date "$(date -u +%Y-%m-%d)" --as-of "$LATEST_REPLAY_CUTOFF" --collection-end "$LATEST_REPLAY_CUTOFF" --provider fake --output-dir outputs/replay --warmup-start "$WARMUP_START" --code-sha "$SHA" --phase16a-run-id "$RUN_ID" --coverage-only
 uv run python - "$WARMUP_START" "$LATEST_REPLAY_CUTOFF" <<'PY'
 import sys
 from datetime import datetime, UTC
@@ -71,7 +71,7 @@ DAYS="$(uv run python -c 'from quant_research_radar.replay import replay_dates; 
 while IFS= read -r DAY; do
   [ -n "$DAY" ] || continue
   CUTOFF="${DAY}T23:59:59.999999+00:00"
-  uv run quant-radar replay --date "$DAY" --as-of "$CUTOFF" --provider deepseek --output-dir outputs/replay --warmup-start "$WARMUP_START" --code-sha "$SHA" --phase16a-run-id "$RUN_ID"
+  uv run quant-radar replay --date "$DAY" --as-of "$CUTOFF" --collection-end "$LATEST_REPLAY_CUTOFF" --provider deepseek --output-dir outputs/replay --warmup-start "$WARMUP_START" --code-sha "$SHA" --phase16a-run-id "$RUN_ID"
 done <<EOF
 $DAYS
 EOF

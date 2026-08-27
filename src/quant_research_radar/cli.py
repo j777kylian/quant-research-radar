@@ -95,6 +95,12 @@ def main() -> None:
     replay = sub.add_parser("replay")
     replay.add_argument("--date", type=date.fromisoformat, required=True)
     replay.add_argument("--as-of", type=datetime.fromisoformat, required=True)
+    replay.add_argument(
+        "--collection-end",
+        type=datetime.fromisoformat,
+        required=True,
+        help="UTC end of the persisted Phase 1.6A collection window; separate from --as-of",
+    )
     replay.add_argument("--output-dir", default="outputs/replay")
     replay.add_argument("--provider", choices=["fake", "deepseek"], default=None)
     replay.add_argument("--warmup-start", type=datetime.fromisoformat, default=None)
@@ -107,6 +113,7 @@ def main() -> None:
         from .llm import FakeLLMClient
 
         cutoff = args.as_of.astimezone(UTC)
+        collection_end = args.collection_end.astimezone(UTC)
         if args.provider == "fake" or (
             args.provider is None and settings.llm_provider == "fake"
         ):
@@ -131,7 +138,7 @@ def main() -> None:
             source="hyperliquid",
             phase16a_run_id=args.phase16a_run_id,
             requested_start=warmup_start,
-            requested_end=cutoff,
+            requested_end=collection_end,
             code_sha=args.code_sha,
         )
         if diagnostics_run is None or not diagnostics_run.diagnostics:
