@@ -30,6 +30,8 @@ def main() -> None:
     collect.add_argument("--limit", type=int, default=None)
     collect.add_argument("--offline", action="store_true")
     collect.add_argument("--history", action="store_true")
+    collect.add_argument("--start", type=datetime.fromisoformat, default=None)
+    collect.add_argument("--end", type=datetime.fromisoformat, default=None)
     analysis = sub.add_parser("analyze")
     analysis.add_argument("--limit", type=int, default=20)
     sub.add_parser("run-daily").add_argument("--offline", action="store_true")
@@ -193,10 +195,16 @@ def main() -> None:
         if args.history and args.source == "hyperliquid":
             source = cast(HyperliquidSource, adapter)
             inserted, duplicates = ingest_records(
-                session, source.collect_history(limit)
+                session,
+                source.collect_history(
+                    limit, offline=args.offline, start=args.start, end=args.end
+                ),
             )
             inserted_candles, candle_duplicates = ingest_records(
-                session, source.collect_candles(limit)
+                session,
+                source.collect_candles(
+                    limit, offline=args.offline, start=args.start, end=args.end
+                ),
             )
             print(
                 json.dumps(

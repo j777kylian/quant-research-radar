@@ -212,10 +212,11 @@ class HyperliquidSource:
                 >= (start or datetime.min.replace(tzinfo=UTC))
             ]
         end = end or datetime.now(UTC)
+        start = start or (end - timedelta(hours=self.lookback_hours))
+        if start > end:
+            raise ValueError("Hyperliquid history start must not be after end")
         end_ms = int(end.timestamp() * 1000)
-        start_ms = int(
-            (start or (end - timedelta(hours=self.lookback_hours))).timestamp() * 1000
-        )
+        start_ms = int(start.timestamp() * 1000)
         records: list[SourceRecord] = []
         for asset in self.assets:
             funding = self._post(
@@ -234,6 +235,8 @@ class HyperliquidSource:
                 if timestamp is None or rate is None:
                     raise ValueError(f"Invalid Hyperliquid funding row for {asset}")
                 if str(row.get("coin", asset)) != asset:
+                    continue
+                if timestamp < start or timestamp > end:
                     continue
                 records.append(
                     SourceRecord(

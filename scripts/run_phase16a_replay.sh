@@ -36,18 +36,40 @@ else
 fi
 
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-WARMUP_START="$(uv run python -c 'from datetime import datetime,UTC,timedelta; print((datetime.now(UTC)-timedelta(days=33)).isoformat())')"
+WARMUP_START="$(uv run python -c 'from quant_research_radar.replay import replay_dates; from datetime import datetime,UTC,timedelta; dates=replay_dates(datetime.now(UTC)); print((datetime.combine(min(dates), datetime.min.time(), UTC)-timedelta(days=33)).isoformat())')"
+LATEST_REPLAY_CUTOFF="$(uv run python -c 'from quant_research_radar.replay import replay_dates,utc_day_cutoff; from datetime import datetime,UTC; print(utc_day_cutoff(max(replay_dates(datetime.now(UTC)))).isoformat())')"
 uv run quant-radar init-db
-uv run quant-radar collect hyperliquid --history --limit 800
+uv run quant-radar collect hyperliquid --history --limit 800 --start "$WARMUP_START" --end "$LATEST_REPLAY_CUTOFF"
+uv run python - "$WARMUP_START" "$LATEST_REPLAY_CUTOFF" <<'PY'
+import sys
+from datetime import datetime, UTC
+from sqlalchemy import select
+from quant_research_radar.db import MarketObservation, make_engine, make_session_factory
+from quant_research_radar.replay import ASSETS, funding_coverage
+from quant_research_radar.config import get_settings
+
+start = datetime.fromisoformat(sys.argv[1]).astimezone(UTC)
+end = datetime.fromisoformat(sys.argv[2]).astimezone(UTC)
+engine = make_engine("sqlite:///data/phase16a-replay.db")
+session = make_session_factory(engine)()
+coverage = funding_coverage(session, start, end)
+print("Funding coverage:", coverage)
+if not all(item["required_warmup_satisfied"] for item in coverage.values()):
+    raise SystemExit("PARTIAL: required bounded funding warm-up is unavailable")
+PY
 uv run quant-radar collect arxiv --limit 25 || echo "arXiv collection degraded; continuing"
 uv run quant-radar collect repec --limit 25 || echo "RePEc degraded; continuing"
 
-mapfile -t DAYS < <(uv run python -c 'from quant_research_radar.replay import replay_dates; from datetime import datetime,UTC; print("\n".join(d.isoformat() for d in replay_dates(datetime.now(UTC))))')
-for DAY in "${DAYS[@]}"; do
+DAYS="$(uv run python -c 'from quant_research_radar.replay import replay_dates; from datetime import datetime,UTC; print("\n".join(d.isoformat() for d in replay_dates(datetime.now(UTC))))')"
+while IFS= read -r DAY; do
+  [ -n "$DAY" ] || continue
   CUTOFF="${DAY}T23:59:59.999999+00:00"
   uv run quant-radar replay --date "$DAY" --as-of "$CUTOFF" --provider deepseek --output-dir outputs/replay --warmup-start "$WARMUP_START" --code-sha "$SHA"
-done
+done <<EOF
+$DAYS
+EOF
 
+export PHASE16A_SHA="$SHA"
 uv run python - <<'PY'
 import json
 from datetime import UTC, datetime
@@ -59,11 +81,18 @@ from quant_research_radar.config import get_settings
 root = Path("outputs/replay")
 dates = replay_dates(datetime.now(UTC))
 audits = [json.loads((root / day.isoformat() / "audit.json").read_text()) for day in dates]
-summary = write_summary(root, datetime.now(UTC), datetime.now(UTC), dates, datetime.now(UTC), audits, "${SHA}")
+import os
+
+summary = write_summary(root, datetime.now(UTC), datetime.now(UTC), dates, datetime.now(UTC), audits, os.environ["PHASE16A_SHA"])
 print(f"SUMMARY={summary}")
 PY
 
 echo "PASS/PARTIAL: Phase 1.6A artifacts generated"
 echo "LOG=$LOG"
 echo "SUMMARY=outputs/replay/phase16a-summary.json"
-for DAY in "${DAYS[@]}"; do echo "REPORT=outputs/replay/$DAY/daily.md AUDIT=outputs/replay/$DAY/audit.json"; done
+while IFS= read -r DAY; do
+  [ -n "$DAY" ] || continue
+  echo "REPORT=outputs/replay/$DAY/daily.md AUDIT=outputs/replay/$DAY/audit.json"
+done <<EOF
+$DAYS
+EOF

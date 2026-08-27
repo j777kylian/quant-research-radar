@@ -28,6 +28,46 @@ def utc_day_cutoff(day: date) -> datetime:
     return datetime.combine(day, time.max, tzinfo=UTC)
 
 
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def funding_coverage(
+    session: Session, start: datetime, end: datetime
+) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for asset in ASSETS:
+        rows = session.scalars(
+            select(MarketObservation)
+            .where(
+                MarketObservation.asset == asset,
+                MarketObservation.observation_kind == "funding",
+            )
+            .order_by(MarketObservation.observed_at)
+        ).all()
+        rows = [
+            row
+            for row in rows
+            if _as_utc(row.observed_at) >= start and _as_utc(row.observed_at) <= end
+        ]
+        earliest = min((_as_utc(row.observed_at) for row in rows), default=None)
+        latest = max((_as_utc(row.observed_at) for row in rows), default=None)
+        result[asset] = {
+            "requested_start": start,
+            "requested_end": end,
+            "earliest_funding_timestamp": earliest,
+            "latest_funding_timestamp": latest,
+            "coverage_duration": (latest - earliest) if earliest and latest else None,
+            "required_warmup_satisfied": bool(
+                earliest is not None
+                and latest is not None
+                and earliest <= start
+                and latest <= end
+            ),
+        }
+    return result
+
+
 def replay_dates(now: datetime | None = None) -> list[date]:
     current = (now or datetime.now(UTC)).astimezone(UTC).date()
     return [current - timedelta(days=offset) for offset in (3, 2, 1)]
@@ -122,6 +162,8 @@ def market_quality(
 def _json_value(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
+    if isinstance(value, timedelta):
+        return value.total_seconds()
     if isinstance(value, dict):
         return {key: _json_value(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -208,6 +250,9 @@ def run_replay_day(
         "code_sha": code_sha,
         "eligible_source_item_count": len(before),
         "hypotheses_generated": created,
+        "funding_coverage": _json_value(
+            funding_coverage(session, warmup_start, cutoff)
+        ),
         "market_quality": _json_value(market_quality(session, warmup_start, cutoff)),
         "metric_availability": metrics,
         "source_status": {
