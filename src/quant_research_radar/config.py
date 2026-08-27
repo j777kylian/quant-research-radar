@@ -15,9 +15,16 @@ class Settings(BaseSettings):
     llm_model: str = "fake-v1"
     llm_api_key: str | None = None
     llm_base_url: str = "https://api.openai.com/v1"
+    deepseek_api_key: str | None = None
+    deepseek_base_url: str = "https://api.deepseek.com"
+    llm_flash_model: str = "deepseek-v4-flash"
+    llm_pro_model: str = "deepseek-v4-pro"
     llm_timeout_seconds: float = 30.0
     http_timeout_seconds: float = 20.0
     http_retries: int = Field(default=2, ge=0, le=5)
+    max_pro_analyst_items: int = Field(default=3, ge=0)
+    max_pro_critic_items: int = Field(default=3, ge=0)
+    max_pro_weekly_reviews: int = Field(default=1, ge=0)
     arxiv_max_items: int = Field(default=10, ge=1, le=100)
     arxiv_lookback_days: int = Field(default=14, ge=1, le=90)
     repec_max_items: int = Field(default=10, ge=1, le=100)

@@ -58,9 +58,12 @@ class CollectionStatus(StrEnum):
 
 class AnalysisRole(StrEnum):
     TRIAGE = "TRIAGE"
+    EXTRACTION = "EXTRACTION"
+    HYPOTHESIS_CANDIDATE = "HYPOTHESIS_CANDIDATE"
+    TUTOR = "TUTOR"
     ANALYST = "ANALYST"
     CRITIC = "CRITIC"
-    TUTOR = "TUTOR"
+    WEEKLY_REVIEW = "WEEKLY_REVIEW"
 
 
 class SourceItem(Base):
@@ -228,11 +231,18 @@ class AnalysisRun(Base):
     role: Mapped[str] = mapped_column(String(20), default=AnalysisRole.ANALYST.value)
     provider: Mapped[str] = mapped_column(String(80))
     model_name: Mapped[str] = mapped_column(String(100))
+    requested_model_tier: Mapped[str | None] = mapped_column(String(20))
+    actual_model_name: Mapped[str | None] = mapped_column(String(100))
+    thinking_enabled: Mapped[bool | None] = mapped_column()
+    reasoning_effort: Mapped[str | None] = mapped_column(String(20))
+    fallback_used: Mapped[bool] = mapped_column(default=False)
     prompt_version: Mapped[str] = mapped_column(String(30), default="1")
     schema_version: Mapped[str] = mapped_column(String(30))
     item_count: Mapped[int] = mapped_column(Integer, default=0)
     success_count: Mapped[int] = mapped_column(Integer, default=0)
     failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(20), default="RUNNING")
+    failure_reason: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
     )

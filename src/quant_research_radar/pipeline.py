@@ -236,10 +236,15 @@ def analyze(session: Session, client: LLMClient, limit: int = 20) -> int:
     items = session.scalars(
         select(SourceItem).order_by(SourceItem.created_at.desc()).limit(limit)
     ).all()
+    route = client.router.resolve("ANALYST") if hasattr(client, "router") else None
     run = AnalysisRun(
         role="ANALYST",
         provider=client.provider,
         model_name=client.model,
+        requested_model_tier=route.tier.value if route else None,
+        actual_model_name=route.model if route else client.model,
+        thinking_enabled=route.thinking if route else None,
+        reasoning_effort=route.reasoning_effort if route else None,
         prompt_version=client.prompt_version,
         schema_version="1",
         item_count=len(items),
@@ -247,12 +252,17 @@ def analyze(session: Session, client: LLMClient, limit: int = 20) -> int:
     )
     session.add(run)
     created = 0
+    pro_calls = 0
+    pro_limit = 3
     for item in items:
         try:
             triage = client.triage(item.title, item.raw_text)
             if not triage.retain:
                 continue
+            if route and pro_calls >= pro_limit:
+                raise ValueError("Pro analyst budget exhausted")
             analyst = client.analyze(item.title, item.raw_text)
+            pro_calls += 1 if route else 0
             critic = client.critique(analyst.possible_hypothesis)
             components, penalties, score = score_hypothesis()
             session.add(
@@ -302,6 +312,11 @@ def analyze(session: Session, client: LLMClient, limit: int = 20) -> int:
             run.success_count += 1
         except Exception:
             run.failure_count += 1
+    run.status = (
+        "SUCCESS"
+        if run.failure_count == 0
+        else ("PARTIAL" if run.success_count else "FAILED")
+    )
     run.ended_at = utcnow()
     session.commit()
     return created
