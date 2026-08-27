@@ -7,10 +7,12 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import select
 
 from .config import get_settings
-from .db import CollectionRun, init_db, make_engine, make_session_factory
+from .db import CollectionRun, make_engine, make_session_factory
 from .llm import DeepSeekClient, FakeLLMClient, ModelRouter
 from .pipeline import (
     analyze,
@@ -22,6 +24,40 @@ from .pipeline import (
 )
 from .replay import funding_coverage, run_replay_day
 from .sources import ArxivSource, HyperliquidSource, RepecSource, SourceAdapter
+
+
+def migrate_database(database_url: str) -> None:
+    engine = make_engine(database_url)
+    with engine.begin() as connection:
+        tables = (
+            set(
+                connection.exec_driver_sql(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).scalars()
+            )
+            if engine.dialect.name == "sqlite"
+            else set()
+        )
+        if tables and "alembic_version" not in tables:
+            from alembic.runtime.migration import MigrationContext
+
+            context = MigrationContext.configure(connection)
+            if "collection_runs" in tables:
+                # Legacy replay DBs were created by create_all with the current
+                # tables, so stamp the last accepted revision before applying 0004.
+                context._ensure_version_table()
+                connection.exec_driver_sql(
+                    "INSERT INTO alembic_version (version_num) VALUES ('0003_phase15c')"
+                )
+            else:
+                raise RuntimeError("Unversioned database has no recognizable schema")
+    command.upgrade(_alembic_config(database_url), "head")
+
+
+def _alembic_config(database_url: str) -> Config:
+    config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", database_url)
+    return config
 
 
 def main() -> None:
@@ -83,8 +119,8 @@ def main() -> None:
             )
         warmup_start = args.warmup_start or cutoff - timedelta(days=30)
         database_url = settings.database_url
+        migrate_database(database_url)
         engine = make_engine(database_url)
-        init_db(engine)
         session = make_session_factory(engine)()
         diagnostics_run = session.scalar(
             select(CollectionRun)
@@ -128,8 +164,8 @@ def main() -> None:
         if args.command == "validate-llm-routing"
         else settings.database_url
     )
+    migrate_database(database_url)
     engine = make_engine(database_url)
-    init_db(engine)
     session = make_session_factory(engine)()
 
     if args.command == "validate-llm-routing":
