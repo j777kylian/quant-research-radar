@@ -280,7 +280,7 @@ def get_phase16a_collection_run(
     phase16a_run_id: str,
     requested_start: datetime,
     requested_end: datetime,
-    code_sha: str,
+    collection_code_sha: str,
     status: str = CollectionStatus.SUCCESS.value,
 ) -> CollectionRun | None:
     """Resolve exactly one Phase 1.6A collection run by explicit provenance."""
@@ -290,7 +290,7 @@ def get_phase16a_collection_run(
         select(CollectionRun).where(
             CollectionRun.source == source,
             CollectionRun.phase16a_run_id == phase16a_run_id,
-            CollectionRun.code_sha == code_sha,
+            CollectionRun.code_sha == collection_code_sha,
             CollectionRun.status == status,
         )
     ).all()

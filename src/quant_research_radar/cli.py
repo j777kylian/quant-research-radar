@@ -110,7 +110,8 @@ def main() -> None:
     replay.add_argument("--output-dir", default="outputs/replay")
     replay.add_argument("--provider", choices=["fake", "deepseek"], default=None)
     replay.add_argument("--warmup-start", type=datetime.fromisoformat, default=None)
-    replay.add_argument("--code-sha", default="unknown")
+    replay.add_argument("--collection-code-sha", required=True)
+    replay.add_argument("--replay-code-sha", required=True)
     replay.add_argument("--coverage-only", action="store_true")
     replay.add_argument("--phase16a-run-id", default=None)
     live_parser = sub.add_parser("live-cycle")
@@ -237,7 +238,7 @@ def main() -> None:
             phase16a_run_id=args.phase16a_run_id,
             requested_start=warmup_start,
             requested_end=collection_end,
-            code_sha=args.code_sha,
+            collection_code_sha=args.collection_code_sha,
         )
         if diagnostics_run is None or not diagnostics_run.diagnostics:
             raise SystemExit(
@@ -259,8 +260,12 @@ def main() -> None:
             Path(args.output_dir),
             args.date,
             warmup_start,
-            args.code_sha,
+            args.replay_code_sha,
             pagination_diagnostics=diagnostics_run.diagnostics,
+            collection_run_id=diagnostics_run.phase16a_run_id,
+            collection_code_sha=diagnostics_run.code_sha,
+            collection_start=diagnostics_run.requested_start,
+            collection_end=diagnostics_run.requested_end,
         )
         print(json.dumps(audit, indent=2, default=str))
         return

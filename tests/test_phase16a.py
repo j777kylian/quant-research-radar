@@ -454,7 +454,7 @@ def test_phase16a_lookup_is_strict_and_timezone_normalized():
             phase16a_run_id="run-a",
             requested_start=start,
             requested_end=end,
-            code_sha="sha-a",
+            collection_code_sha="sha-a",
         )
         is run
     )
@@ -466,7 +466,7 @@ def test_phase16a_lookup_is_strict_and_timezone_normalized():
                 phase16a_run_id="run-a",
                 requested_start=datetime.fromisoformat("2026-01-01T00:00:00+00:00"),
                 requested_end=datetime.fromisoformat("2026-01-01T01:00:00+00:00"),
-                code_sha="sha-a",
+                collection_code_sha="sha-a",
             )
             is run
         )
@@ -477,7 +477,7 @@ def test_phase16a_lookup_is_strict_and_timezone_normalized():
             phase16a_run_id="wrong",
             requested_start=start,
             requested_end=end,
-            code_sha="sha-a",
+            collection_code_sha="sha-a",
         )
         is None
     )
@@ -488,7 +488,7 @@ def test_phase16a_lookup_is_strict_and_timezone_normalized():
             phase16a_run_id="run-a",
             requested_start=start,
             requested_end=end,
-            code_sha="wrong",
+            collection_code_sha="wrong",
         )
         is None
     )
@@ -499,7 +499,7 @@ def test_phase16a_lookup_is_strict_and_timezone_normalized():
             phase16a_run_id="run-a",
             requested_start=start + timedelta(seconds=1),
             requested_end=end,
-            code_sha="sha-a",
+            collection_code_sha="sha-a",
         )
         is None
     )
@@ -510,7 +510,7 @@ def test_phase16a_lookup_is_strict_and_timezone_normalized():
             phase16a_run_id="run-a",
             requested_start=start,
             requested_end=end,
-            code_sha="sha-a",
+            collection_code_sha="sha-a",
             status="FAILED",
         )
         is None
@@ -544,7 +544,7 @@ def test_collection_window_end_is_separate_from_replay_cutoff():
                 phase16a_run_id="shared",
                 requested_start=start,
                 requested_end=day3,
-                code_sha="sha",
+                collection_code_sha="sha",
             )
             is run
         )
@@ -556,7 +556,7 @@ def test_collection_window_end_is_separate_from_replay_cutoff():
             phase16a_run_id="shared",
             requested_start=start,
             requested_end=day1,
-            code_sha="sha",
+            collection_code_sha="sha",
         )
         is None
     )
