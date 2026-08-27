@@ -47,6 +47,36 @@ def test_market_gate_rejects_a_missing_completed_candle_inside_warmup() -> None:
     assert any("candle coverage gap" in blocker for blocker in blockers)
 
 
+def test_market_gate_requires_the_exact_completed_valuation_candle() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    as_of = datetime(2026, 8, 27, 10, 12, 18, tzinfo=UTC)
+    valuation = datetime(2026, 8, 27, 9, tzinfo=UTC)
+    start = valuation - timedelta(days=33)
+    records = []
+    for asset in HyperliquidSource.assets:
+        records.extend(
+            HyperliquidSource._history_record(
+                asset, start + timedelta(hours=index), index
+            )
+            for index in range(33 * 24 + 1)
+        )
+        records.extend(
+            HyperliquidSource._candle_record(
+                asset, start + timedelta(hours=index), index
+            )
+            for index in range(33 * 24)
+        )
+    ingest_records(session, records)
+    calculate_metrics(session)
+
+    gate, blockers = _market_gate(session, as_of)
+
+    assert gate == "BLOCKED"
+    assert any("candle coverage gap" in blocker for blocker in blockers)
+
+
 def test_completed_candle_boundaries_are_strictly_point_in_time_safe() -> None:
     expected = datetime(2026, 8, 27, 9, tzinfo=UTC)
     assert (
