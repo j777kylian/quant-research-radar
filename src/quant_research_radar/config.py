@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     hyperliquid_assets: list[str] = ["BTC", "ETH", "SOL"]
     market_warmup_days: int = Field(default=33, ge=1, le=90)
     live_bootstrap_overlap_hours: int = Field(default=2, ge=0, le=24)
+    live_incremental_max_hours: int = Field(default=30, ge=24, le=72)
     report_output_dir: str = "outputs"
 
 

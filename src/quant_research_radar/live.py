@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .config import get_settings
@@ -20,6 +20,27 @@ from .replay import (
     valuation_timestamp,
 )
 from .sources import ArxivSource, HyperliquidSource, RepecSource
+
+
+def _latest_persisted_completed_candle(session: Session) -> datetime | None:
+    rows = session.execute(
+        select(MarketObservation.asset, func.max(MarketObservation.observed_at))
+        .where(
+            MarketObservation.observation_kind == "candle",
+            MarketObservation.asset.in_(ASSETS),
+        )
+        .group_by(MarketObservation.asset)
+    ).all()
+    present_assets = {asset for asset, _timestamp in rows}
+    if not present_assets:
+        return None
+    missing_assets = set(ASSETS) - present_assets
+    if missing_assets:
+        raise RuntimeError(
+            "LIVE_INCREMENTAL_COVERAGE_INCOMPLETE: missing candles for "
+            + ", ".join(sorted(missing_assets))
+        )
+    return min(normalize_utc(timestamp) for _asset, timestamp in rows if timestamp)
 
 
 def _market_gate(session: Session, as_of: datetime) -> tuple[str, list[str]]:
@@ -73,12 +94,19 @@ def run_live_cycle(
     statuses: dict[str, str] = {}
     counts: dict[str, int] = {}
     hyperliquid = HyperliquidSource()
-    existing_market = session.scalar(select(MarketObservation.id)) is not None
-    if existing_market:
-        bootstrap_start = collection_end - timedelta(
-            hours=settings.live_bootstrap_overlap_hours + 1
-        )
+    persisted_latest: datetime | None = None
     try:
+        persisted_latest = _latest_persisted_completed_candle(session)
+        if persisted_latest is not None:
+            stale_by = collection_end - persisted_latest
+            if stale_by > timedelta(hours=settings.live_incremental_max_hours):
+                raise RuntimeError(
+                    "LIVE_INCREMENTAL_HISTORY_TOO_STALE: "
+                    f"{stale_by.total_seconds() / 3600:.1f}h"
+                )
+            bootstrap_start = persisted_latest - timedelta(
+                hours=settings.live_bootstrap_overlap_hours
+            )
         funding = hyperliquid.collect_history(
             max(1, int((collection_end - bootstrap_start).total_seconds() // 3600) + 1),
             start=bootstrap_start,
@@ -112,8 +140,16 @@ def run_live_cycle(
         )
         session.commit()
     except Exception as exc:
-        statuses["hyperliquid_transport"] = f"FAILED: {exc}"
-        statuses["market_data"] = "FAILED"
+        blocked = str(exc).startswith(
+            (
+                "LIVE_INCREMENTAL_HISTORY_TOO_STALE",
+                "LIVE_INCREMENTAL_COVERAGE_INCOMPLETE",
+            )
+        )
+        statuses["hyperliquid_transport"] = (
+            "NOT_CALLED" if blocked else f"FAILED: {exc}"
+        )
+        statuses["market_data"] = "INSUFFICIENT_HISTORY" if blocked else "FAILED"
         audit = {
             "cycle": cycle,
             "as_of": now.isoformat(),
@@ -122,7 +158,7 @@ def run_live_cycle(
             "source_status": statuses,
             "counts": counts,
             "hypotheses_generated": 0,
-            "cycle_technical_status": "FAILED",
+            "cycle_technical_status": "BLOCKED" if blocked else "FAILED",
             "blocker_reason": str(exc),
             "deepseek_call_status": "NOT_CALLED_DUE_TO_GATE",
             "no_lookahead": True,
@@ -130,6 +166,8 @@ def run_live_cycle(
         (cycle_root / "audit.json").write_text(
             json.dumps(audit, indent=2, default=str), encoding="utf-8"
         )
+        if blocked:
+            raise RuntimeError("LIVE_CYCLE_STATUS=BLOCKED: " + str(exc)) from exc
         raise
     calculate_metrics(session)
     gate, blockers = _market_gate(session, now)
@@ -140,6 +178,9 @@ def run_live_cycle(
             "as_of": now.isoformat(),
             "bootstrap_start": bootstrap_start.isoformat(),
             "collection_end": collection_end.isoformat(),
+            "persisted_latest_completed_candle": (
+                persisted_latest.isoformat() if persisted_latest is not None else None
+            ),
             "latest_completed_candle": valuation_timestamp(now).isoformat(),
             "code_sha": code_sha,
             "database_identity": str(session.get_bind().engine.url),
@@ -178,6 +219,9 @@ def run_live_cycle(
         "as_of": now.isoformat(),
         "bootstrap_start": bootstrap_start.isoformat(),
         "collection_end": collection_end.isoformat(),
+        "persisted_latest_completed_candle": (
+            persisted_latest.isoformat() if persisted_latest is not None else None
+        ),
         "latest_completed_candle": collection_end.isoformat(),
         "code_sha": code_sha,
         "database_identity": str(session.get_bind().engine.url),

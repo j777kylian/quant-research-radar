@@ -368,10 +368,9 @@ class HyperliquidSource:
                 >= (start or datetime.min.replace(tzinfo=UTC))
             ]
         end = end or datetime.now(UTC)
+        start = start or (end - timedelta(hours=max(limit, 2)))
         end_ms = int(end.timestamp() * 1000)
-        start_ms = int(
-            (start or (end - timedelta(hours=max(limit, 2)))).timestamp() * 1000
-        )
+        start_ms = int(start.timestamp() * 1000)
         records: list[SourceRecord] = []
         for asset in self.assets:
             rows = self._post(
@@ -385,11 +384,16 @@ class HyperliquidSource:
                     },
                 }
             )
-            for row in rows[:limit]:
+            accepted = 0
+            for row in rows:
                 timestamp = _timestamp(row.get("t"))
                 close = _number(row.get("c"))
                 if timestamp is None or close is None:
                     raise ValueError(f"Invalid Hyperliquid candle row for {asset}")
+                if timestamp < start or timestamp > end:
+                    continue
+                if timestamp.minute or timestamp.second or timestamp.microsecond:
+                    raise ValueError(f"Unaligned Hyperliquid candle row for {asset}")
                 records.append(
                     SourceRecord(
                         "MARKET",
@@ -413,6 +417,9 @@ class HyperliquidSource:
                         },
                     )
                 )
+                accepted += 1
+                if accepted == limit:
+                    break
         return records
 
     def _post(self, payload: dict[str, Any]) -> Any:
