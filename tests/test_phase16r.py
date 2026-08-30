@@ -157,6 +157,16 @@ def test_market_metrics_create_deterministic_observation_only_when_rule_holds() 
     ).all()
     for observation in session.scalars(select(MarketObservation)).all():
         observation.retrieved_at = as_of
+        if observation.asset == "BTC" and observation.observation_kind == "funding":
+            observation.funding_rate = (
+                1.0 if observation.observed_at.replace(tzinfo=UTC) == valuation else 0.0
+            )
+        if observation.asset == "BTC" and observation.observation_kind == "candle":
+            observation.mark_price = (
+                102.0
+                if observation.observed_at.replace(tzinfo=UTC) == valuation
+                else 100.0
+            )
     for candle in candles:
         if (
             candle.asset == "BTC"
@@ -178,7 +188,7 @@ def test_market_metrics_create_deterministic_observation_only_when_rule_holds() 
                     MarketMetric(
                         observation_id=candle.id,
                         metric_name="return_24h",
-                        metric_value=-0.02,
+                        metric_value=0.02,
                         calculation_metadata={
                             "pit_cutoff": valuation.isoformat(),
                             "support_receipt_cutoff": as_of.isoformat(),
@@ -203,6 +213,7 @@ def test_market_metrics_create_deterministic_observation_only_when_rule_holds() 
                 ]
             )
     session.commit()
+    calculate_metrics(session, as_of=as_of)
     assert generate_market_observations(session, as_of) == 1
     assert generate_market_observations(session, as_of) == 0
     item = session.scalar(

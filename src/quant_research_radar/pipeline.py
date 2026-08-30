@@ -136,8 +136,10 @@ def _trusted_metric_values(
             return None
         values[metric.metric_name] = metric.metric_value
     receipt_safe = _receipt_safe_values(session, observation, as_of)
-    if any(receipt_safe[name] is None for name in ("funding_percentile", "return_24h")):
-        return None
+    for name in ("funding_percentile", "return_24h"):
+        value = receipt_safe[name]
+        if value is None or abs(values.get(name, 0.0) - value) > 1e-12:
+            return None
     return values
 
 
