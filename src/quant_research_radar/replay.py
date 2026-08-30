@@ -317,7 +317,7 @@ def run_replay_day(
     cutoff = utc_day_cutoff(replay_day)
     day_root = output_root / replay_day.isoformat()
     day_root.mkdir(parents=True, exist_ok=True)
-    calculate_metrics(session)
+    calculate_metrics(session, as_of=cutoff)
     # Research clock: exclude persisted evidence after this day's PIT cutoff;
     # the collection clock may extend through a later collection_end.
     eligible_items = session.scalars(

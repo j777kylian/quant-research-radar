@@ -37,15 +37,18 @@ def return_at(prices: dict[datetime, float], at: datetime, hours: int) -> float 
 def rolling_volatility(
     prices: dict[datetime, float], at: datetime, window: int = 24
 ) -> float | None:
-    ordered = sorted(
-        (timestamp, price) for timestamp, price in prices.items() if timestamp <= at
-    )
+    ordered = [
+        (at - timedelta(hours=offset), prices.get(at - timedelta(hours=offset)))
+        for offset in range(window, -1, -1)
+    ]
+    if any(price is None for _, price in ordered):
+        return None
     returns: list[float] = []
     for (_, previous), (_, current) in zip(ordered, ordered[1:], strict=False):
+        assert previous is not None and current is not None
         if current <= 0 or previous <= 0:
             continue
         returns.append(current / previous - 1.0)
-    returns = returns[-window:]
     if len(returns) < 2:
         return None
     mean = sum(returns) / len(returns)

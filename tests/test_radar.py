@@ -35,10 +35,11 @@ def test_pipeline_persists_separated_objects_and_report_has_labels(
     db = session()
     ingest(db, ArxivSource(), 1, offline=True)
     ingest(db, HyperliquidSource(), 3, offline=True)
-    assert analyze(db, FakeLLMClient(), 10) == 4
+    assert analyze(db, FakeLLMClient(), 10) == 1
     assert db.scalars(select(Claim)).first() is not None
     assert db.scalars(select(Hypothesis)).first() is not None
     report = daily_report(db, str(tmp_path))
     text = report.read_text()
-    assert "FACT" in text and "CLAIM" in text and "HYPOTHESIS" in text
+    assert "CLAIM" in text and "HYPOTHESIS" in text
+    assert "UNAVAILABLE — no market observation was collected." in text
     assert all(word not in text.upper() for word in ["BUY", "SELL", "LONG", "SHORT"])

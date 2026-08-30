@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+import re
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -17,11 +19,186 @@ from .db import (
     MarketObservation,
     SourceItem,
     content_hash,
+    normalize_utc,
     utcnow,
 )
 from .llm import LLMClient
 from .metrics import funding_percentile, return_at, rolling_volatility
 from .sources import SourceAdapter, SourceRecord
+
+
+def _valuation_timestamp(cutoff: datetime) -> datetime:
+    cutoff = cutoff.astimezone(UTC)
+    return cutoff.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+
+
+TOPIC_TERMS = (
+    "asset pricing",
+    "cryptocurrency",
+    "crypto",
+    "defi",
+    "event study",
+    "funding rate",
+    "market microstructure",
+    "market return",
+    "order flow",
+    "perpetual",
+    "prediction market",
+    "realized volatility",
+    "return predictability",
+)
+TOPIC_CATEGORIES = ("q-fin", "econ", "stat")
+
+
+def _valid_topic_category(category: object) -> bool:
+    value = str(category)
+    return any(
+        value == root or value.startswith(f"{root}.") for root in TOPIC_CATEGORIES
+    )
+
+
+def academic_relevant(title: str, text: str, metadata: Any = None) -> bool:
+    haystack = f"{title} {text}".lower()
+    categories = (
+        metadata
+        if isinstance(metadata, list)
+        else (metadata or {}).get("categories", [])
+    )
+    return any(_valid_topic_category(category) for category in categories) and any(
+        re.search(rf"\b{re.escape(term)}\b", haystack) for term in TOPIC_TERMS
+    )
+
+
+def _metric_values(
+    session: Session, observation: MarketObservation
+) -> dict[str, float]:
+    return {
+        metric.metric_name: metric.metric_value
+        for metric in session.scalars(
+            select(MarketMetric).where(MarketMetric.observation_id == observation.id)
+        )
+    }
+
+
+def _receipt_safe_values(
+    session: Session, observation: MarketObservation, as_of: datetime
+) -> dict[str, float | None]:
+    rows = session.scalars(
+        select(MarketObservation).where(MarketObservation.asset == observation.asset)
+    ).all()
+    rows = [row for row in rows if normalize_utc(row.retrieved_at) <= as_of]
+    funding = [
+        (row.observed_at, row.funding_rate)
+        for row in rows
+        if row.observation_kind in ("funding", "snapshot")
+    ]
+    prices = {
+        row.observed_at: row.mark_price
+        for row in rows
+        if row.observation_kind == "candle" and row.mark_price is not None
+    }
+    return {
+        "funding_percentile": funding_percentile(funding, observation.observed_at),
+        "return_24h": return_at(prices, observation.observed_at, 24),
+    }
+
+
+def _trusted_metric_values(
+    session: Session, observation: MarketObservation, as_of: datetime
+) -> dict[str, float] | None:
+    if (
+        observation.source_name != "hyperliquid"
+        or normalize_utc(observation.retrieved_at) > as_of
+    ):
+        return None
+    metrics = session.scalars(
+        select(MarketMetric).where(MarketMetric.observation_id == observation.id)
+    ).all()
+    values: dict[str, float] = {}
+    expected_cutoff = normalize_utc(observation.observed_at).isoformat()
+    for metric in metrics:
+        if metric.metric_name not in {"funding_percentile", "return_24h"}:
+            continue
+        if normalize_utc(metric.calculated_at) > as_of:
+            return None
+        try:
+            metric_cutoff = normalize_utc(
+                datetime.fromisoformat(metric.calculation_metadata["pit_cutoff"])
+            ).isoformat()
+            support_cutoff = normalize_utc(
+                datetime.fromisoformat(
+                    metric.calculation_metadata["support_receipt_cutoff"]
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+        if metric_cutoff != expected_cutoff or support_cutoff > as_of:
+            return None
+        values[metric.metric_name] = metric.metric_value
+    receipt_safe = _receipt_safe_values(session, observation, as_of)
+    if any(receipt_safe[name] is None for name in ("funding_percentile", "return_24h")):
+        return None
+    return values
+
+
+def generate_market_observations(session: Session, as_of: datetime) -> int:
+    as_of = normalize_utc(as_of)
+    valuation = _valuation_timestamp(as_of)
+    created = 0
+    candles = session.scalars(
+        select(MarketObservation).where(
+            MarketObservation.observation_kind == "candle",
+            MarketObservation.observed_at == valuation,
+        )
+    ).all()
+    for candle in candles:
+        metrics = _trusted_metric_values(session, candle, as_of)
+        if metrics is None:
+            continue
+        percentile = metrics.get("funding_percentile")
+        return_24h = metrics.get("return_24h")
+        if percentile is None or return_24h is None:
+            continue
+        if not (percentile >= 90 and abs(return_24h) >= 0.01):
+            continue
+        external_id = f"market-observation:{candle.asset}:{valuation.isoformat()}:extreme-funding-24h"
+        if session.scalar(
+            select(SourceItem).where(SourceItem.external_id == external_id)
+        ):
+            continue
+        metadata = {
+            "asset": candle.asset,
+            "as_of": valuation.isoformat(),
+            "observation_rule": "EXTREME_FUNDING_WITH_24H_MOVE",
+            "metric_values": metrics,
+            "market_observation_id": str(candle.id),
+            "source_name": candle.source_name,
+        }
+        direction = "negative" if return_24h < 0 else "positive"
+        session.add(
+            SourceItem(
+                source_type="MARKET",
+                source_name="quant-radar-metric-rule",
+                external_id=external_id,
+                canonical_url=None,
+                title=(
+                    f"{candle.asset} funding is in the upper {percentile:.0f}th percentile "
+                    f"while its 24h return is {direction}"
+                ),
+                authors=[],
+                published_at=valuation,
+                retrieved_at=normalize_utc(candle.retrieved_at),
+                raw_text=(
+                    f"PIT-safe metric observation at {valuation.isoformat()}: "
+                    f"funding percentile={percentile:.2f}; return_24h={return_24h:.6f}."
+                ),
+                raw_metadata=metadata,
+                content_sha256=content_hash("market observation", metadata),
+            )
+        )
+        created += 1
+    session.commit()
+    return created
 
 
 def ingest(
@@ -179,8 +356,12 @@ def _persist_market(session: Session, record: SourceRecord) -> None:
 
 
 def calculate_metrics(
-    session: Session, window: int = 30, volatility_window: int = 24
+    session: Session,
+    as_of: datetime,
+    window: int = 30,
+    volatility_window: int = 24,
 ) -> int:
+    cutoff = normalize_utc(as_of)
     observations = session.scalars(
         select(MarketObservation).order_by(
             MarketObservation.asset, MarketObservation.observed_at
@@ -188,7 +369,8 @@ def calculate_metrics(
     ).all()
     by_asset: dict[str, list[MarketObservation]] = {}
     for observation in observations:
-        by_asset.setdefault(observation.asset, []).append(observation)
+        if normalize_utc(observation.retrieved_at) <= cutoff:
+            by_asset.setdefault(observation.asset, []).append(observation)
     count = 0
     for _asset, rows in by_asset.items():
         funding = [
@@ -214,24 +396,41 @@ def calculate_metrics(
                 ),
             }
             for name, value in values.items():
-                if value is None or session.scalar(
+                existing = session.scalar(
                     select(MarketMetric).where(
                         MarketMetric.observation_id == row.id,
                         MarketMetric.metric_name == name,
                     )
+                )
+                if (
+                    existing
+                    and existing.calculation_metadata.get("support_receipt_cutoff")
+                    == cutoff.isoformat()
                 ):
+                    continue
+                if value is None:
+                    if existing:
+                        session.delete(existing)
+                    continue
+                metadata = {
+                    "pit_cutoff": row.observed_at.isoformat(),
+                    "support_receipt_cutoff": cutoff.isoformat(),
+                    "window": window
+                    if name == "funding_percentile"
+                    else volatility_window,
+                }
+                if existing:
+                    existing.metric_value = value
+                    existing.calculated_at = cutoff
+                    existing.calculation_metadata = metadata
                     continue
                 session.add(
                     MarketMetric(
                         observation_id=row.id,
                         metric_name=name,
                         metric_value=value,
-                        calculation_metadata={
-                            "pit_cutoff": row.observed_at.isoformat(),
-                            "window": window
-                            if name == "funding_percentile"
-                            else volatility_window,
-                        },
+                        calculated_at=cutoff,
+                        calculation_metadata=metadata,
                     )
                 )
                 count += 1
@@ -252,10 +451,41 @@ def score_hypothesis() -> tuple[dict[str, int], list[str], int]:
     return components, penalties, max(0, sum(components.values()) - len(penalties) * 3)
 
 
+def hypothesis_quality_ok(
+    statement: str,
+    independent_variable: str,
+    dependent_variable: str,
+    universe: str,
+    horizon: str,
+    required_data: list[str],
+) -> bool:
+    return bool(
+        statement.strip()
+        and independent_variable.strip()
+        and dependent_variable.strip()
+        and universe.strip()
+        and horizon.strip()
+        and required_data
+        and any(
+            term
+            in f"{statement} {independent_variable} {dependent_variable} {universe} {' '.join(required_data)}".lower()
+            for term in TOPIC_TERMS
+        )
+    )
+
+
 def analyze(session: Session, client: LLMClient, limit: int = 20) -> int:
-    items = session.scalars(
-        select(SourceItem).order_by(SourceItem.created_at.desc()).limit(limit)
+    candidates = session.scalars(
+        select(SourceItem)
+        .where(SourceItem.source_type == "ACADEMIC")
+        .order_by(SourceItem.created_at.desc())
+        .limit(limit)
     ).all()
+    items = [
+        item
+        for item in candidates
+        if academic_relevant(item.title, item.raw_text, item.raw_metadata)
+    ]
     route = client.router.resolve("ANALYST") if hasattr(client, "router") else None
     run = AnalysisRun(
         role="ANALYST",
@@ -277,13 +507,28 @@ def analyze(session: Session, client: LLMClient, limit: int = 20) -> int:
     for item in items:
         try:
             triage = client.triage(item.title, item.raw_text)
-            if not triage.retain:
+            if not (
+                triage.retain
+                and triage.relevance_score >= 60
+                and triage.testability_score >= 60
+            ):
                 continue
             if route and pro_calls >= pro_limit:
                 raise ValueError("Pro analyst budget exhausted")
             analyst = client.analyze(item.title, item.raw_text)
-            pro_calls += 1 if route else 0
+            if not hypothesis_quality_ok(
+                analyst.possible_hypothesis,
+                "funding rate",
+                "subsequent return",
+                analyst.universe,
+                analyst.horizon,
+                analyst.required_data,
+            ):
+                continue
             critic = client.critique(analyst.possible_hypothesis)
+            if not critic.provenance_sufficient:
+                continue
+            pro_calls += 1 if route else 0
             components, penalties, score = score_hypothesis()
             session.add(
                 Claim(
@@ -357,22 +602,38 @@ def daily_report(
             (SourceItem.published_at.is_(None)) | (SourceItem.published_at <= as_of),
         )
         .order_by(SourceItem.created_at.desc())
-        .limit(3)
     ).all()
     hypotheses = session.scalars(
         select(Hypothesis)
         .where(Hypothesis.created_at <= as_of)
         .order_by(Hypothesis.score.desc())
-        .limit(3)
     ).all()
-    concepts = session.scalars(
-        select(Concept)
-        .where(Concept.last_seen_at <= as_of)
-        .order_by(Concept.last_seen_at.desc())
-        .limit(2)
-    ).all()
+    source_by_id = {item.id: item for item in items}
+    hypotheses = [
+        hypothesis
+        for hypothesis in hypotheses
+        if hypothesis.source_item_id in source_by_id
+        and academic_relevant(
+            source_by_id[hypothesis.source_item_id].title,
+            source_by_id[hypothesis.source_item_id].raw_text,
+            source_by_id[hypothesis.source_item_id].raw_metadata,
+        )
+    ][:3]
+    market = [
+        item
+        for item in items
+        if item.source_type == "MARKET"
+        and item.source_name == "quant-radar-metric-rule"
+        and item.raw_metadata.get("as_of", "")
+        == _valuation_timestamp(as_of).isoformat()
+    ][:3]
+    academic_items = [
+        item
+        for item in items
+        if item.source_type == "ACADEMIC"
+        and academic_relevant(item.title, item.raw_text, item.raw_metadata)
+    ][:2]
     lines = [f"# Daily Quant Radar — {report_date}", "", "## Market Observation", ""]
-    market = [item for item in items if item.source_type == "MARKET"]
     if not market:
         lines.append("UNAVAILABLE — no market observation was collected.")
     for item in market:
@@ -385,7 +646,12 @@ def daily_report(
             "",
         ]
     lines += ["## Academic Research", ""]
-    academic_items = [i for i in items if i.source_type == "ACADEMIC"][:2]
+    academic_items = [
+        item
+        for item in items
+        if item.source_type == "ACADEMIC"
+        and academic_relevant(item.title, item.raw_text, item.raw_metadata)
+    ][:2]
     if not academic_items:
         lines.append("- **CLAIM:** No academic item retained in this bounded run.")
     for item in academic_items:
@@ -398,9 +664,13 @@ def daily_report(
             f"- **HYPOTHESIS:** {hypothesis.falsifiable_statement} Status: {hypothesis.status}."
         )
     lines += ["", "## Concepts", ""]
-    for concept in concepts:
+    if market:
         lines.append(
-            f"- **{concept.name}:** {concept.beginner_explanation} {concept.example}"
+            "- **Funding percentile:** A rank of the current funding rate within its trailing window; it identifies unusually crowded positioning without being a trading signal."
+        )
+    if hypotheses:
+        lines.append(
+            "- **Falsification criterion:** The pre-specified result that would reject a hypothesis when tested on point-in-time data."
         )
     lines += ["", "No execution instructions are generated.", ""]
     path = Path(output_dir) / f"daily-{report_date}.md"

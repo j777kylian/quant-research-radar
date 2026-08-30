@@ -188,8 +188,8 @@ def test_volatility_is_non_annualized_and_pit_safe() -> None:
 def test_pipeline_metrics_do_not_create_duplicate_metrics() -> None:
     session = db()
     ingest_records(session, HyperliquidSource().collect_candles(5, offline=True))
-    first = calculate_metrics(session)
-    second = calculate_metrics(session)
+    first = calculate_metrics(session, datetime.now(UTC))
+    second = calculate_metrics(session, datetime.now(UTC))
     assert first >= 0 and second == 0
     assert session.query(MarketMetric).count() >= 0
 
@@ -247,6 +247,7 @@ def test_report_labels_and_unavailable(tmp_path: Path) -> None:
         ).FakeLLMClient(),
     )
     report = daily_report(session, str(tmp_path)).read_text()
-    assert "FACT" in report and "CLAIM" in report and "HYPOTHESIS" in report
+    assert "CLAIM" in report and "HYPOTHESIS" in report
+    assert "UNAVAILABLE — no market observation was collected." in report
     assert "UNAVAILABLE" not in report or "execution" in report
     assert all(word not in report.upper() for word in ["BUY", "SELL", "LONG", "SHORT"])

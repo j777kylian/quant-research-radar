@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
-from quant_research_radar import live
+from quant_research_radar import live, pipeline
 from quant_research_radar.db import Base, MarketObservation
 from quant_research_radar.live import (
     _latest_persisted_completed_candle,
@@ -43,7 +43,7 @@ def test_market_gate_rejects_a_missing_completed_candle_inside_warmup() -> None:
             if index != 2
         )
     ingest_records(session, records)
-    calculate_metrics(session)
+    calculate_metrics(session, as_of=as_of)
 
     gate, blockers = _market_gate(session, as_of)
 
@@ -73,7 +73,7 @@ def test_market_gate_requires_the_exact_completed_valuation_candle() -> None:
             for index in range(33 * 24)
         )
     ingest_records(session, records)
-    calculate_metrics(session)
+    calculate_metrics(session, as_of=as_of)
 
     gate, blockers = _market_gate(session, as_of)
 
@@ -104,7 +104,7 @@ def test_market_gate_blocks_when_exact_four_hour_anchor_is_missing() -> None:
             if index != 33 * 24 - 4
         )
     ingest_records(session, records)
-    calculate_metrics(session)
+    calculate_metrics(session, as_of=as_of)
 
     gate, blockers = _market_gate(session, as_of)
 
@@ -262,6 +262,7 @@ def test_cycle_two_collects_the_entire_gap_from_persisted_coverage(
     Base.metadata.create_all(engine)
     monkeypatch.setattr(live, "HyperliquidSource", RecordingHyperliquid)
     monkeypatch.setattr(live, "datetime", FrozenDatetime)
+    monkeypatch.setattr(pipeline, "utcnow", lambda: first_now)
 
     run_live_cycle(
         Session(engine), cast(DeepSeekClient, FakeLLMClient()), tmp_path, 1, "test-sha"

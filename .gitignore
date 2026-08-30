@@ -24,6 +24,7 @@ outputs/
 logs/
 data/phase16a-replay.db
 data/phase16b-live-*.db
+data/phase16r-regeneration-*.db
 .phase16a-replay.lock
 
 

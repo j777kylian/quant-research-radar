@@ -11,7 +11,14 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .db import CollectionRun, MarketObservation, normalize_utc
 from .llm import DeepSeekClient
-from .pipeline import analyze, calculate_metrics, daily_report, ingest, ingest_records
+from .pipeline import (
+    analyze,
+    calculate_metrics,
+    daily_report,
+    generate_market_observations,
+    ingest,
+    ingest_records,
+)
 from .replay import (
     ASSETS,
     METRIC_NAMES,
@@ -20,6 +27,14 @@ from .replay import (
     valuation_timestamp,
 )
 from .sources import ArxivSource, HyperliquidSource, RepecSource
+
+
+def rendered_report_counts(report: str) -> dict[str, int]:
+    return {
+        "market_facts": report.count("**FACT:**"),
+        "academic_claim_lines": report.count("- **CLAIM:**"),
+        "hypotheses": report.count("- **HYPOTHESIS:**"),
+    }
 
 
 def _latest_persisted_completed_candle(session: Session) -> datetime | None:
@@ -139,6 +154,18 @@ def run_live_cycle(
             )
         )
         session.commit()
+        latest_receipt = session.scalar(
+            select(MarketObservation.retrieved_at)
+            .where(
+                MarketObservation.observation_kind == "candle",
+                MarketObservation.observed_at == collection_end,
+                MarketObservation.source_name == "hyperliquid",
+            )
+            .order_by(MarketObservation.retrieved_at.desc())
+            .limit(1)
+        )
+        if latest_receipt is not None:
+            now = max(now, normalize_utc(latest_receipt))
     except Exception as exc:
         blocked = str(exc).startswith(
             (
@@ -169,7 +196,7 @@ def run_live_cycle(
         if blocked:
             raise RuntimeError("LIVE_CYCLE_STATUS=BLOCKED: " + str(exc)) from exc
         raise
-    calculate_metrics(session)
+    calculate_metrics(session, as_of=now)
     gate, blockers = _market_gate(session, now)
     statuses["market_data"] = "READY" if gate == "READY" else "INSUFFICIENT_HISTORY"
     if gate != "READY":
@@ -198,6 +225,8 @@ def run_live_cycle(
             json.dumps(audit, indent=2, default=str), encoding="utf-8"
         )
         raise RuntimeError("LIVE_CYCLE_STATUS=BLOCKED: " + "; ".join(blockers))
+    market_observations = generate_market_observations(session, now)
+    counts["market_observations"] = market_observations
     for name, adapter in (("arxiv", ArxivSource()), ("repec", RepecSource())):
         try:
             counts[name] = ingest(session, adapter, 10)
@@ -214,6 +243,7 @@ def run_live_cycle(
         + report.read_text(encoding="utf-8").split("\n", 2)[-1],
         encoding="utf-8",
     )
+    rendered = rendered_report_counts(daily.read_text(encoding="utf-8"))
     audit = {
         "cycle": cycle,
         "as_of": now.isoformat(),
@@ -228,6 +258,7 @@ def run_live_cycle(
         "source_status": statuses,
         "counts": counts,
         "hypotheses_generated": hypotheses,
+        "rendered_content": rendered,
         "market_quality": market_quality(session, bootstrap_start, collection_end),
         "metric_availability": metric_availability(session, now),
         "deepseek_call_status": "CALLED",
@@ -259,7 +290,21 @@ def write_live_summary(root: Path, audits: list[dict[str, Any]], code_sha: str) 
 def write_live_review(root: Path) -> Path:
     path = root / "human-review.md"
     path.write_text(
-        "# Phase 1.6B Human Review\n\n## Cycle 1\nUsefulness: 0 / 1 / 2\n",
+        "# Phase 1.6B Human Review\n\n"
+        "## Cycle 1\n"
+        "Usefulness: 0 / 1 / 2\n"
+        "Best market observation:\nBest hypothesis:\nEvidence quality:\n"
+        "Potential hallucination:\nGeneric/repetitive content:\nUseful quant concept:\n"
+        "Would this have surfaced something I otherwise might not investigate?\nNotes:\n\n"
+        "## Cycle 2\n"
+        "Usefulness: 0 / 1 / 2\n"
+        "Best market observation:\nBest hypothesis:\nEvidence quality:\n"
+        "Potential hallucination:\nGeneric/repetitive content:\nUseful quant concept:\n"
+        "Would this have surfaced something I otherwise might not investigate?\nNotes:\n\n"
+        "## Aggregate\n"
+        "Average usefulness:\nRepeated hypotheses:\nMost promising research theme:\n"
+        "Main weakness:\nWould I read this tomorrow?\n"
+        "Proceed to 5–7 day observation: YES / NO / UNSURE\n",
         encoding="utf-8",
     )
     return path

@@ -412,7 +412,7 @@ def main() -> None:
             )
         else:
             print(f"Inserted {ingest(session, adapter, limit, args.offline)} records")
-        calculate_metrics(session)
+        calculate_metrics(session, datetime.now(UTC))
     elif args.command == "analyze":
         analysis_client: FakeLLMClient | DeepSeekClient = (
             FakeLLMClient()
@@ -439,7 +439,7 @@ def main() -> None:
         ingest(session, hyperliquid, 5, args.offline)
         ingest_records(session, hyperliquid.collect_history(30, offline=args.offline))
         ingest_records(session, hyperliquid.collect_candles(30, offline=args.offline))
-        calculate_metrics(session)
+        calculate_metrics(session, datetime.now(UTC))
         analyze(session, FakeLLMClient(), 20)
         print(daily_report(session, settings.report_output_dir))
     elif args.command == "report":

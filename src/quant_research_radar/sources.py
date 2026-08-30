@@ -51,13 +51,13 @@ class ArxivSource:
                     ["Fixture Researcher"],
                     datetime.now(UTC) - timedelta(days=1),
                     "We study whether extreme funding rates predict subsequent returns.",
-                    {"fixture": True},
+                    {"fixture": True, "categories": ["q-fin.ST"]},
                 )
             ][:limit]
         response = self.client.get(
             self.endpoint,
             params={
-                "search_query": "all:bitcoin OR all:cryptocurrency OR all:funding rate",
+                "search_query": "cat:q-fin.* OR all:(crypto OR cryptocurrency OR defi OR perpetual OR funding OR microstructure)",
                 "start": 0,
                 "max_results": min(limit, 100),
                 "sortBy": "submittedDate",
