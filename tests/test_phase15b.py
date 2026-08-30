@@ -246,7 +246,7 @@ def test_report_labels_and_unavailable(tmp_path: Path) -> None:
             "quant_research_radar.llm", fromlist=["FakeLLMClient"]
         ).FakeLLMClient(),
     )
-    report = daily_report(session, str(tmp_path)).read_text()
+    report = daily_report(session, str(tmp_path), as_of=datetime.now(UTC)).read_text()
     assert "CLAIM" in report and "HYPOTHESIS" in report
     assert "UNAVAILABLE — no market observation was collected." in report
     assert "UNAVAILABLE" not in report or "execution" in report

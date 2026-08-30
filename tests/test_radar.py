@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import create_engine, select
@@ -38,7 +39,7 @@ def test_pipeline_persists_separated_objects_and_report_has_labels(
     assert analyze(db, FakeLLMClient(), 10) == 1
     assert db.scalars(select(Claim)).first() is not None
     assert db.scalars(select(Hypothesis)).first() is not None
-    report = daily_report(db, str(tmp_path))
+    report = daily_report(db, str(tmp_path), as_of=datetime.now(UTC))
     text = report.read_text()
     assert "CLAIM" in text and "HYPOTHESIS" in text
     assert "UNAVAILABLE — no market observation was collected." in text

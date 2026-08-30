@@ -188,7 +188,7 @@ def test_market_metrics_create_deterministic_observation_only_when_rule_holds() 
                     MarketMetric(
                         observation_id=candle.id,
                         metric_name="return_24h",
-                        metric_value=0.02,
+                        metric_value=0.020000000000000018,
                         calculation_metadata={
                             "pit_cutoff": valuation.isoformat(),
                             "support_receipt_cutoff": as_of.isoformat(),
@@ -350,7 +350,7 @@ def test_report_counts_only_retained_quant_context_and_concepts(tmp_path: Path) 
         ],
     )
     assert analyze(session, FakeLLMClient()) == 1
-    report = daily_report(session, str(tmp_path)).read_text()
+    report = daily_report(session, str(tmp_path), as_of=datetime.now(UTC)).read_text()
     assert "Quantum chaos" not in report
     assert "Falsification criterion" in report
     assert "Hypothesis Candidates" in report

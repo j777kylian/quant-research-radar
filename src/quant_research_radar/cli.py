@@ -441,10 +441,12 @@ def main() -> None:
         ingest_records(session, hyperliquid.collect_candles(30, offline=args.offline))
         calculate_metrics(session, datetime.now(UTC))
         analyze(session, FakeLLMClient(), 20)
-        print(daily_report(session, settings.report_output_dir))
+        print(
+            daily_report(session, settings.report_output_dir, as_of=datetime.now(UTC))
+        )
     elif args.command == "report":
         print(
-            daily_report(session, settings.report_output_dir)
+            daily_report(session, settings.report_output_dir, as_of=datetime.now(UTC))
             if args.kind == "daily"
             else weekly_report(session, settings.report_output_dir)
         )

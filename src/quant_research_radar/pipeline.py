@@ -53,7 +53,8 @@ TOPIC_CATEGORIES = ("q-fin", "econ", "stat")
 def _valid_topic_category(category: object) -> bool:
     value = str(category)
     return any(
-        value == root or value.startswith(f"{root}.") for root in TOPIC_CATEGORIES
+        value == root or value.startswith(f"{root}.") and len(value) > len(root) + 1
+        for root in TOPIC_CATEGORIES
     )
 
 
@@ -138,7 +139,7 @@ def _trusted_metric_values(
     receipt_safe = _receipt_safe_values(session, observation, as_of)
     for name in ("funding_percentile", "return_24h"):
         value = receipt_safe[name]
-        if value is None or abs(values.get(name, 0.0) - value) > 1e-12:
+        if value is None or values.get(name) != value:
             return None
     return values
 
@@ -596,7 +597,9 @@ def daily_report(
     as_of: datetime | None = None,
 ) -> Path:
     report_date = report_date or datetime.now(UTC).date()
-    as_of = as_of or utcnow()
+    if as_of is None:
+        raise ValueError("daily_report requires an explicit as_of cutoff")
+    as_of = normalize_utc(as_of)
     items = session.scalars(
         select(SourceItem)
         .where(
