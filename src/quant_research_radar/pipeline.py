@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -24,6 +25,7 @@ from .db import (
 )
 from .llm import LLMClient
 from .metrics import funding_percentile, return_at, rolling_volatility
+from .raw_archive import RawArchive, archive_receipt
 from .sources import SourceAdapter, SourceRecord
 
 
@@ -296,7 +298,11 @@ def ingest(
             session.commit()
 
 
-def ingest_records(session: Session, records: list[SourceRecord]) -> tuple[int, int]:
+def ingest_records(
+    session: Session, records: list[SourceRecord], archive: RawArchive | None = None
+) -> tuple[int, int]:
+    if archive is None and any(record.source_type == "MARKET" for record in records):
+        archive = RawArchive(Path("data/raw"))
     inserted = 0
     duplicates = 0
     for record in records:
@@ -325,37 +331,51 @@ def ingest_records(session: Session, records: list[SourceRecord]) -> tuple[int, 
             )
         )
         if record.source_type == "MARKET":
-            _persist_market(session, record)
+            observation = _persist_market(session, record)
+            if archive is not None and observation is not None:
+                archive_receipt(
+                    session,
+                    archive,
+                    content=json.dumps(record.raw_metadata, sort_keys=True).encode(),
+                    media_type="application/json",
+                    provider=record.source_name,
+                    canonical_url=None,
+                    retrieved_at=normalize_utc(observation.retrieved_at),
+                    source_native_timestamp=record.published_at,
+                    market_observation_id=observation.id,
+                )
         inserted += 1
     session.commit()
     return inserted, duplicates
 
 
-def _persist_market(session: Session, record: SourceRecord) -> None:
+def _persist_market(session: Session, record: SourceRecord) -> MarketObservation | None:
     metadata = record.raw_metadata
     timestamp = record.published_at or utcnow()
     kind = str(metadata.get("kind", "snapshot"))
-    if session.scalar(
+    existing = session.scalar(
         select(MarketObservation).where(
             MarketObservation.asset == metadata["asset"],
             MarketObservation.observed_at == timestamp,
             MarketObservation.observation_kind == kind,
         )
-    ):
-        return
-    session.add(
-        MarketObservation(
-            asset=str(metadata["asset"]),
-            observed_at=timestamp,
-            observation_kind=kind,
-            funding_rate=metadata.get("funding_rate"),
-            mark_price=metadata.get("mark_price", metadata.get("close")),
-            open_interest=metadata.get("open_interest"),
-            volume=metadata.get("volume"),
-            source_payload=metadata,
-            retrieved_at=utcnow(),
-        )
     )
+    if existing:
+        return existing
+    observation = MarketObservation(
+        asset=str(metadata["asset"]),
+        observed_at=timestamp,
+        observation_kind=kind,
+        funding_rate=metadata.get("funding_rate"),
+        mark_price=metadata.get("mark_price", metadata.get("close")),
+        open_interest=metadata.get("open_interest"),
+        volume=metadata.get("volume"),
+        source_payload=metadata,
+        retrieved_at=utcnow(),
+    )
+    session.add(observation)
+    session.flush()
+    return observation
 
 
 def calculate_metrics(

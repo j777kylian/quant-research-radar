@@ -14,6 +14,7 @@ from .db import (
     ChannelHypothesis,
     EvidenceLink,
     MarketObservation,
+    RawArtifactReceipt,
     SourceItem,
     UnifiedHypothesisMember,
     UnifiedHypothesisRecord,
@@ -30,6 +31,7 @@ from .intelligence import (
     analyze_social,
     fuse_hypotheses,
 )
+from .llm import CriticOutput, LLMClient
 from .metrics import funding_percentile, return_at
 
 MODE = "ACCELERATED_RECONSTRUCTIVE_REPLAY"
@@ -141,6 +143,63 @@ def _quant_relevant(item: SourceItem) -> bool:
         ("derivative", "liquidity"),
     )
     return any(all(term in text for term in pair) for pair in topic_pairs)
+
+
+def _source_dispositions(
+    session: Session, as_of: datetime, availability_basis: AvailabilityBasis
+) -> list[dict[str, Any]]:
+    dispositions: list[dict[str, Any]] = []
+    for channel, source_types in (
+        (Channel.ACADEMIC, {"ACADEMIC", "PREPRINT"}),
+        (Channel.SOCIAL, {"PRACTITIONER", "SOCIAL"}),
+    ):
+        for item in session.scalars(
+            select(SourceItem).where(SourceItem.source_type.in_(source_types))
+        ).all():
+            disposition, reason = "RETAINED", None
+            if item.published_at is None or normalize_utc(item.published_at) > as_of:
+                disposition, reason = "REJECTED_AVAILABILITY", "PUBLISHED_AFTER_AS_OF"
+            elif (
+                availability_basis == AvailabilityBasis.PRODUCTION_RECEIPT
+                and normalize_utc(item.retrieved_at) > as_of
+            ):
+                disposition, reason = "REJECTED_AVAILABILITY", "RETRIEVED_AFTER_AS_OF"
+            elif not _quant_relevant(item):
+                disposition, reason = "REJECTED_RELEVANCE", "STRICT_TOPIC_GATE"
+            receipt = session.scalar(
+                select(RawArtifactReceipt).where(
+                    RawArtifactReceipt.source_item_id == item.id
+                )
+            )
+            dispositions.append(
+                {
+                    "channel": channel.value,
+                    "source_item_id": str(item.id),
+                    "external_id": item.external_id,
+                    "canonical_url": item.canonical_url,
+                    "published_at": normalize_utc(item.published_at).isoformat()
+                    if item.published_at
+                    else None,
+                    "retrieved_at": normalize_utc(item.retrieved_at).isoformat(),
+                    "replay_availability_at": normalize_utc(
+                        item.published_at
+                    ).isoformat()
+                    if item.published_at
+                    else None,
+                    "access_mode": str(
+                        item.raw_metadata.get("access_mode", "METADATA_ONLY")
+                    ),
+                    "raw_artifact_id": str(receipt.raw_artifact_id)
+                    if receipt
+                    else None,
+                    "linked_hypothesis_ids": [],
+                    "disposition": disposition,
+                    "reason_code": reason,
+                }
+            )
+    return sorted(
+        dispositions, key=lambda item: (str(item["channel"]), str(item["external_id"]))
+    )
 
 
 def channel_evidence(
@@ -581,6 +640,7 @@ def run_intelligence_day(
                 "analyzer_input_channels": ["MARKET"],
             },
         },
+        "source_dispositions": _source_dispositions(session, as_of, availability_basis),
         "fusion": {
             "unified_hypotheses": len(unified_drafts),
             "maturity": [draft.maturity.value for draft in unified_drafts],
@@ -603,6 +663,32 @@ def run_intelligence_day(
             if family.startswith("market|")
         ],
         "critics": critics,
+        "replay_candidates": (
+            [
+                {
+                    "origin_channel": draft.origin.value,
+                    "statement": draft.statement,
+                    "maturity": draft.maturity.value,
+                    "condition": draft.condition,
+                    "outcome": draft.outcome,
+                    "universe": draft.universe,
+                    "horizon": draft.horizon,
+                    "mechanism": draft.mechanism,
+                    "required_data": draft.required_data,
+                    "falsification_criterion": draft.falsification_criterion,
+                    "evidence_ids": draft.evidence_ids,
+                    "evidence_provenance_ids": [evidence.provenance_id],
+                    "evidence_independence_keys": [evidence.independence_key],
+                    "evidence_observed_at": [str(evidence.observed_at)],
+                    "evidence_metadata": [evidence.metadata],
+                    "semantic_claim_key": draft.semantic_claim_key,
+                    "recurrence_status": "NEW_CANDIDATE",
+                }
+                for draft, evidence in channel_pairs
+            ]
+            if not persist
+            else []
+        ),
         "tutor": {
             "concepts": len(tutor_concepts),
             "evidence_source": False,
@@ -630,12 +716,90 @@ def run_intelligence_day(
     return audit
 
 
+def _review_replay_candidate(
+    candidate: dict[str, Any], client: LLMClient | None
+) -> dict[str, Any]:
+    if client is None:
+        return candidate | {
+            "critic": {"disposition": "NOT_RUN", "reason": "no replay critic client"},
+            "tutor": None,
+        }
+    try:
+        review = client.critique(
+            json.dumps(
+                {
+                    "review_contract": [
+                        "evidence provenance",
+                        "channel origin",
+                        "condition measurability",
+                        "outcome measurability",
+                        "universe",
+                        "horizon",
+                        "mechanism strength",
+                        "alternative explanations",
+                        "required data",
+                        "falsification criterion",
+                        "duplicate recurrence",
+                        "evidence independence",
+                        "overclaiming",
+                        "empirical-test suitability",
+                    ],
+                    "candidate": candidate,
+                },
+                sort_keys=True,
+            )
+        )
+        review = CriticOutput.model_validate(review.model_dump())
+    except (AttributeError, TypeError, ValueError):
+        return candidate | {
+            "critic": {
+                "disposition": "REQUEST_DATA",
+                "reason": "critic structured output failed",
+            },
+            "tutor": None,
+        }
+    if not review.provenance_sufficient:
+        return candidate | {
+            "critic": {
+                "disposition": "REQUEST_DATA",
+                "reason": "; ".join(review.failure_reasons)
+                or "provenance insufficient",
+                "confounders": review.confounders,
+                "biases": review.biases,
+            },
+            "tutor": None,
+        }
+    tutor: dict[str, Any] | None = None
+    try:
+        tutor = {
+            "non_evidentiary": True,
+            **client.tutor(candidate["statement"]).model_dump(),
+        }
+    except (AttributeError, TypeError, ValueError):
+        tutor = None
+    return candidate | {
+        "critic": {
+            "disposition": "ACCEPT",
+            "reason": "structured replay review completed",
+            "confounders": review.confounders,
+            "biases": review.biases,
+        },
+        "tutor": tutor,
+    }
+
+
 def run_intelligence_replay(
-    session: Session, output_root: Path, days: list[datetime]
+    session: Session,
+    output_root: Path,
+    days: list[datetime],
+    *,
+    client: LLMClient | None = None,
 ) -> dict[str, Any]:
     """Sequential V2 reconstructive replay; deliberately never changes source receipt clocks."""
     output_root.mkdir(parents=True, exist_ok=True)
     audits: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
+    run_id = output_root.name
     seen_families: set[str] = set()
     for ordinal, as_of in enumerate(days, start=1):
         day_root = (
@@ -651,6 +815,28 @@ def run_intelligence_replay(
         )
         seen_families.update(audit["new_hypothesis_families"])
         audit["ordinal"] = ordinal
+        for index, candidate in enumerate(audit.pop("replay_candidates"), start=1):
+            reviewed = _review_replay_candidate(
+                {
+                    **candidate,
+                    "replay_candidate_id": f"{run_id}:{ordinal}:{index}",
+                    "run_id": run_id,
+                    "pseudo_day": normalize_utc(as_of).isoformat(),
+                    "analysis_mode": MODE,
+                    "availability_basis": AvailabilityBasis.SOURCE_NATIVE_REPLAY.value,
+                },
+                client,
+            )
+            candidates.append(reviewed)
+            for evidence_id in reviewed["evidence_ids"]:
+                if not evidence_id.startswith("source-item:"):
+                    continue
+                source_item_id = evidence_id.removeprefix("source-item:")
+                for disposition in audit["source_dispositions"]:
+                    if disposition["source_item_id"] == source_item_id:
+                        disposition["linked_hypothesis_ids"].append(
+                            reviewed["replay_candidate_id"]
+                        )
         audits.append(audit)
     summary = {
         "phase": "1.6D",
@@ -665,6 +851,32 @@ def run_intelligence_replay(
             audit["fusion"]["unified_hypotheses"] for audit in audits
         ),
     }
+    tutor_outputs = [
+        {"replay_candidate_id": candidate["replay_candidate_id"], **candidate["tutor"]}
+        for candidate in candidates
+        if candidate["tutor"] is not None
+    ]
+    if tutor_outputs:
+        (output_root / "tutor.json").write_text(
+            json.dumps(
+                {"non_evidentiary": True, "candidates": tutor_outputs}, indent=2
+            ),
+            encoding="utf-8",
+        )
+    (output_root / "replay-candidate-ledger.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "analysis_mode": MODE,
+                "availability_basis": AvailabilityBasis.SOURCE_NATIVE_REPLAY.value,
+                "real_receipt_pit": REAL_RECEIPT_PIT,
+                "candidates": candidates,
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
     (output_root / "phase16d-summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8"
     )

@@ -1,4 +1,6 @@
+import warnings
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -14,6 +16,7 @@ from quant_research_radar.intelligence_v2 import (
     market_evidence,
     run_intelligence_replay,
 )
+from quant_research_radar.llm import CriticOutput, FakeLLMClient
 
 
 def _seed(session: Session, *, retrieved_at: datetime) -> None:
@@ -73,7 +76,140 @@ def test_replay_does_not_persist_reconstructive_candidates(tmp_path) -> None:
     assert session.query(ChannelHypothesis).count() == 0
 
 
-def test_replay_critics_report_noop_instead_of_fabricated_pass(tmp_path) -> None:
+def test_replay_writes_nonproduction_candidate_ledger_with_traceable_evidence(
+    tmp_path,
+) -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    as_of = datetime(2026, 8, 30, 23, 59, 59, tzinfo=UTC)
+    _seed(session, retrieved_at=as_of + timedelta(days=1))
+
+    run_intelligence_replay(session, tmp_path, [as_of])
+
+    ledger = __import__("json").loads(
+        (tmp_path / "replay-candidate-ledger.json").read_text()
+    )
+    candidate = ledger["candidates"][0]
+    assert candidate["analysis_mode"] == "ACCELERATED_RECONSTRUCTIVE_REPLAY"
+    assert candidate["availability_basis"] == "SOURCE_NATIVE_AVAILABILITY_TIME"
+    assert candidate["origin_channel"] == "MARKET"
+    assert candidate["evidence_ids"] == [
+        "v2-market:SOL:2026-08-30T22:00:00+00:00:funding-extreme"
+    ]
+    assert candidate["critic"] == {
+        "disposition": "NOT_RUN",
+        "reason": "no replay critic client",
+    }
+    assert session.query(ChannelHypothesis).count() == 0
+
+
+def test_replay_candidate_is_critic_reviewed_and_tutored_without_production_persistence(
+    tmp_path,
+) -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    as_of = datetime(2026, 8, 30, 23, 59, 59, tzinfo=UTC)
+    _seed(session, retrieved_at=as_of + timedelta(days=1))
+
+    run_intelligence_replay(session, tmp_path, [as_of], client=FakeLLMClient())
+
+    ledger = __import__("json").loads(
+        (tmp_path / "replay-candidate-ledger.json").read_text()
+    )
+    candidate = ledger["candidates"][0]
+    assert candidate["critic"]["disposition"] == "ACCEPT"
+    assert candidate["tutor"]["non_evidentiary"] is True
+    assert (tmp_path / "tutor.json").exists()
+    assert session.query(ChannelHypothesis).count() == 0
+
+
+class RecordingClient(FakeLLMClient):
+    def __init__(self) -> None:
+        self.critic_input = ""
+
+    def critique(self, hypothesis: str):
+        self.critic_input = hypothesis
+        return super().critique(hypothesis)
+
+
+def test_replay_critic_receives_structured_candidate_context(tmp_path) -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    as_of = datetime(2026, 8, 30, 23, 59, 59, tzinfo=UTC)
+    _seed(session, retrieved_at=as_of + timedelta(days=1))
+    client = RecordingClient()
+
+    run_intelligence_replay(session, tmp_path, [as_of], client=client)
+
+    context = __import__("json").loads(client.critic_input)["candidate"]
+    assert context["origin_channel"] == "MARKET"
+    assert context["evidence_ids"]
+    assert context["evidence_provenance_ids"]
+    assert context["evidence_independence_keys"]
+    assert context["evidence_observed_at"]
+    assert context["evidence_metadata"]
+    assert context["recurrence_status"] == "NEW_CANDIDATE"
+    assert context["condition"] and context["outcome"]
+    assert context["universe"] and context["horizon"]
+    assert context["required_data"] and context["falsification_criterion"]
+    assert context["analysis_mode"] == "ACCELERATED_RECONSTRUCTIVE_REPLAY"
+
+
+class MalformedClient(FakeLLMClient):
+    def critique(self, hypothesis: str) -> CriticOutput:
+        return cast(CriticOutput, {})
+
+
+def test_malformed_replay_critic_output_fails_closed(tmp_path) -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    as_of = datetime(2026, 8, 30, 23, 59, 59, tzinfo=UTC)
+    _seed(session, retrieved_at=as_of + timedelta(days=1))
+
+    run_intelligence_replay(session, tmp_path, [as_of], client=MalformedClient())
+
+    candidate = __import__("json").loads(
+        (tmp_path / "replay-candidate-ledger.json").read_text()
+    )["candidates"][0]
+    assert candidate["critic"]["disposition"] == "REQUEST_DATA"
+    assert candidate["tutor"] is None
+
+
+class InvalidConstructedClient(FakeLLMClient):
+    def critique(self, hypothesis: str) -> CriticOutput:
+        return CriticOutput.model_construct(
+            biases="not-a-list",
+            confounders=None,
+            failure_reasons=[],
+            provenance_sufficient=True,
+        )
+
+
+def test_invalid_constructed_critic_output_fails_closed(tmp_path) -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    as_of = datetime(2026, 8, 30, 23, 59, 59, tzinfo=UTC)
+    _seed(session, retrieved_at=as_of + timedelta(days=1))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        run_intelligence_replay(
+            session, tmp_path, [as_of], client=InvalidConstructedClient()
+        )
+
+    candidate = __import__("json").loads(
+        (tmp_path / "replay-candidate-ledger.json").read_text()
+    )["candidates"][0]
+    assert candidate["critic"]["disposition"] == "REQUEST_DATA"
+    assert candidate["tutor"] is None
+
+
+def test_replay_critics_report_noop_without_client(tmp_path) -> None:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     session = Session(engine)

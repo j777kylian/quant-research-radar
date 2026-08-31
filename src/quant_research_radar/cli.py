@@ -135,6 +135,7 @@ def main() -> None:
     v2_replay.add_argument("--database-url", required=True)
     v2_replay.add_argument("--start-date", type=date.fromisoformat, required=True)
     v2_replay.add_argument("--days", type=int, default=7)
+    v2_replay.add_argument("--provider", choices=["fake", "deepseek"], default="fake")
     v2_discover = sub.add_parser("phase16d-discover")
     v2_discover.add_argument("--output", required=True)
     v2_discover.add_argument("--database-url", required=True)
@@ -171,6 +172,7 @@ def main() -> None:
         if not 1 <= args.limit <= 100:
             raise SystemExit("--limit must be between 1 and 100")
         from .discovery import ingest_records as ingest_phase16d_records
+        from .raw_archive import RawArchive
 
         migrate_database(args.database_url)
         session = make_session_factory(make_engine(args.database_url))()
@@ -180,7 +182,10 @@ def main() -> None:
             *PractitionerRssSource().collect(args.limit),
         ]
         discovery_result = ingest_phase16d_records(
-            session, records, retrieved_at=retrieved_at
+            session,
+            records,
+            retrieved_at=retrieved_at,
+            archive=RawArchive(Path("data/raw")),
         )
         artifact = Path(args.output)
         artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -219,7 +224,24 @@ def main() -> None:
             )
             for index in range(args.days)
         ]
-        replay_result = run_intelligence_replay(session, Path(args.output_dir), days)
+        v2_client: LLMClient
+        if args.provider == "fake":
+            v2_client = FakeLLMClient()
+        else:
+            if not settings.deepseek_api_key:
+                raise SystemExit(
+                    "DEEPSEEK_API_KEY is required for DeepSeek replay review"
+                )
+            v2_client = DeepSeekClient(
+                settings.deepseek_api_key,
+                ModelRouter(settings.llm_flash_model, settings.llm_pro_model),
+                settings.deepseek_base_url,
+                settings.llm_timeout_seconds,
+                settings.http_retries,
+            )
+        replay_result = run_intelligence_replay(
+            session, Path(args.output_dir), days, client=v2_client
+        )
         print(
             json.dumps(
                 {

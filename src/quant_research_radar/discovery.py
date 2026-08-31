@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 
@@ -14,6 +15,7 @@ from .db import (
     content_hash,
     normalize_utc,
 )
+from .raw_archive import RawArchive, archive_receipt
 from .sources import SourceRecord
 
 
@@ -57,13 +59,18 @@ def _source(session: Session, record: SourceRecord) -> EvidenceSource:
 
 
 def ingest_records(
-    session: Session, records: list[SourceRecord], *, retrieved_at: datetime
+    session: Session,
+    records: list[SourceRecord],
+    *,
+    retrieved_at: datetime,
+    archive: RawArchive | None = None,
 ) -> dict[str, int]:
     """Persist source records and canonical work/version locations without inflating studies."""
     retrieved_at = normalize_utc(retrieved_at)
     items = 0
     works: set[str] = set()
     locations = 0
+    archive_failures = 0
     for record in records:
         source_item = session.scalar(
             select(SourceItem).where(
@@ -88,6 +95,36 @@ def ingest_records(
             session.add(source_item)
             session.flush()
             items += 1
+        if archive is not None:
+            payload = record.raw_metadata.get("source_payload")
+            if payload is None:
+                content = record.raw_text.encode("utf-8")
+                media_type = "text/plain"
+            elif isinstance(payload, str) and payload.lstrip().startswith("<"):
+                content = payload.encode("utf-8")
+                media_type = "application/xml"
+            else:
+                content = json.dumps(
+                    payload, sort_keys=True, separators=(",", ":")
+                ).encode()
+                media_type = "application/json"
+            try:
+                archive_receipt(
+                    session,
+                    archive,
+                    content=content,
+                    media_type=media_type,
+                    provider=record.source_name,
+                    canonical_url=record.canonical_url,
+                    retrieved_at=retrieved_at,
+                    source_native_timestamp=record.published_at,
+                    source_item_id=source_item.id,
+                )
+            except (OSError, TypeError, ValueError):
+                archive_failures += 1
+                source_item.raw_metadata = source_item.raw_metadata | {
+                    "archive_status": "ARCHIVE_FAILED"
+                }
         identity, doi, arxiv_id = _identity(record)
         work = session.scalar(
             select(ResearchWork).where(ResearchWork.canonical_identity == identity)
@@ -130,4 +167,5 @@ def ingest_records(
         "source_items": items,
         "canonical_works": len(works),
         "locations": locations,
+        "archive_failures": archive_failures,
     }

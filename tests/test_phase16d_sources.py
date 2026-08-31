@@ -125,6 +125,7 @@ def test_practitioner_rss_xml_path_preserves_primary_identity() -> None:
 
     assert records[0].external_id == "post-1"
     assert records[0].raw_metadata["independence_key"] == "https://example.org/post-1"
+    assert records[0].raw_metadata["source_payload"].startswith("<item>")
 
 
 def test_source_registry_marks_unavailable_scraping_targets_without_using_them() -> (

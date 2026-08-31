@@ -72,6 +72,48 @@ class AnalysisRole(StrEnum):
     WEEKLY_REVIEW = "WEEKLY_REVIEW"
 
 
+class RawArtifact(Base):
+    """Immutable content-addressed raw object; never overwritten when a source changes."""
+
+    __tablename__ = "raw_artifacts"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    content_sha256: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    media_type: Mapped[str] = mapped_column(String(100))
+    byte_size: Mapped[int] = mapped_column(Integer)
+    storage_uri: Mapped[str] = mapped_column(String(1000), unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
+class RawArtifactReceipt(Base):
+    """One lawful retrieval event; many receipts may reference one immutable object."""
+
+    __tablename__ = "raw_artifact_receipts"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    raw_artifact_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("raw_artifacts.id"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(100), index=True)
+    canonical_url: Mapped[str | None] = mapped_column(String(1000))
+    source_native_timestamp: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    parser_version: Mapped[str] = mapped_column(String(50), default="1")
+    archive_status: Mapped[str] = mapped_column(String(30), default="ARCHIVED")
+    analysis_mode: Mapped[str] = mapped_column(String(50), default="PRODUCTION_LIVE")
+    source_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("source_items.id"), index=True
+    )
+    market_observation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("market_observations.id"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
 class SourceItem(Base):
     __tablename__ = "source_items"
     __table_args__ = (UniqueConstraint("source_type", "external_id"),)

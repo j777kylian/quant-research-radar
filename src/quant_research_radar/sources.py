@@ -301,6 +301,7 @@ class PractitionerRssSource:
                         "independence_key": link or external_id,
                         "primary_url": link or external_id,
                         "feed": self.endpoint,
+                        "source_payload": ET.tostring(item, encoding="unicode"),
                     },
                 )
             )
