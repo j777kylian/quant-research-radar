@@ -333,6 +333,10 @@ def _persist_market_hypothesis(
         if observation_ids
         else None
     )
+    if receipt is None or receipt.collection_run_id is None:
+        raise ValueError(
+            "market evidence requires an archived receipt bound to a collection run"
+        )
     hypothesis = ChannelHypothesis(
         channel=draft.origin.value,
         statement=draft.statement,
@@ -399,6 +403,10 @@ def _persist_hypothesis(
         )
         .order_by(RawArtifactReceipt.retrieved_at.desc(), RawArtifactReceipt.id.desc())
     )
+    if receipt is None or receipt.collection_run_id is None:
+        raise ValueError(
+            "source evidence requires an archived receipt bound to a collection run"
+        )
     hypothesis = ChannelHypothesis(
         channel=draft.origin.value,
         statement=draft.statement,

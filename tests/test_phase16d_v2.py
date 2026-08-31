@@ -7,7 +7,10 @@ from sqlalchemy.orm import Session
 from quant_research_radar.db import (
     Base,
     ChannelHypothesis,
+    CollectionRun,
     MarketObservation,
+    RawArtifact,
+    RawArtifactReceipt,
     SourceItem,
     content_hash,
     normalize_utc,
@@ -88,6 +91,40 @@ def test_v2_day_keeps_channels_separate_and_persists_market_h1(tmp_path: Path) -
                 content_sha256=content_hash("social", {}),
             ),
         ]
+    )
+    session.commit()
+    artifact = RawArtifact(
+        content_sha256="f" * 64,
+        media_type="application/json",
+        byte_size=2,
+        storage_uri="data/raw/objects/ff/" + "f" * 64,
+    )
+    run = CollectionRun(source="test", status="SUCCESS")
+    session.add_all([artifact, run])
+    session.flush()
+    for source_item in session.query(SourceItem).all():
+        session.add(
+            RawArtifactReceipt(
+                raw_artifact_id=artifact.id,
+                provider=source_item.source_name,
+                canonical_url=source_item.canonical_url,
+                source_native_timestamp=source_item.published_at,
+                retrieved_at=as_of,
+                source_item_id=source_item.id,
+                collection_run_id=run.id,
+            )
+        )
+    observation = session.query(MarketObservation).first()
+    session.add(
+        RawArtifactReceipt(
+            raw_artifact_id=artifact.id,
+            provider="hyperliquid",
+            canonical_url=None,
+            source_native_timestamp=observation.observed_at,
+            retrieved_at=as_of,
+            market_observation_id=observation.id,
+            collection_run_id=run.id,
+        )
     )
     session.commit()
 

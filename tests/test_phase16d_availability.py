@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from quant_research_radar.db import (
     Base,
     ChannelHypothesis,
+    CollectionRun,
     EvidenceLink,
     MarketObservation,
     RawArtifact,
@@ -81,8 +82,9 @@ def test_production_recurrence_persists_one_occurrence_per_as_of(tmp_path) -> No
         byte_size=2,
         storage_uri="data/raw/objects/aa/" + "a" * 64,
     )
-    session.add(artifact)
+    session.add_all([artifact, CollectionRun(source="test", status="SUCCESS")])
     session.flush()
+    run = session.query(CollectionRun).one()
     session.add(
         RawArtifactReceipt(
             raw_artifact_id=artifact.id,
@@ -91,6 +93,7 @@ def test_production_recurrence_persists_one_occurrence_per_as_of(tmp_path) -> No
             source_native_timestamp=observation.observed_at,
             retrieved_at=first_as_of,
             market_observation_id=observation.id,
+            collection_run_id=run.id,
         )
     )
     session.commit()
