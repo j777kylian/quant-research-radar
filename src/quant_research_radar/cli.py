@@ -151,6 +151,7 @@ def main() -> None:
     )
     knowledge.add_argument("--channel")
     knowledge.add_argument("--maturity")
+    knowledge.add_argument("--as-of", type=datetime.fromisoformat)
     summary = sub.add_parser("rebuild-phase16a-summary")
     summary.add_argument("--output-dir", default="outputs/replay")
     summary.add_argument("--phase16a-run-id", default=None)
@@ -191,9 +192,12 @@ def main() -> None:
                 scope=args.scope,
                 channel=args.channel,
                 maturity=args.maturity,
+                as_of=args.as_of,
             )
             if args.action == "search"
-            else hypothesis_lineage(session, args.value)
+            else hypothesis_lineage(
+                session, args.value, scope=args.scope, as_of=args.as_of
+            )
         )
         print(json.dumps(knowledge_result, indent=2, sort_keys=True, default=str))
         return

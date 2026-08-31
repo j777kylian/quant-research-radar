@@ -108,6 +108,7 @@ def test_evidence_links_retain_origin_and_challenge_without_merging_channels() -
         required_data=["funding", "candles"],
         falsification_criterion="No conditional difference from baseline.",
         maturity="H1_STATISTICAL_HYPOTHESIS",
+        as_of=datetime(2026, 8, 1, tzinfo=UTC),
     )
     session.add_all([item, hypothesis])
     session.flush()

@@ -24,7 +24,7 @@ def _hypothesis(
     item = SourceItem(
         source_type="ACADEMIC",
         source_name="openalex",
-        external_id=f"{asset}:{at.isoformat()}",
+        external_id=f"{asset}:{at.isoformat()}:{mode}",
         canonical_url="https://example.test/work",
         title=f"{asset} funding",
         authors=[],
@@ -106,7 +106,8 @@ def test_retrieval_scope_as_of_and_exact_archived_lineage() -> None:
                 channel_hypothesis_id=first.id,
                 source_item_id=session.scalar(
                     select(SourceItem.id).where(
-                        SourceItem.external_id == f"SOL:{at.isoformat()}"
+                        SourceItem.external_id
+                        == f"SOL:{at.isoformat()}:PRODUCTION_LIVE"
                     )
                 ),
                 relation="ORIGIN",
@@ -166,6 +167,64 @@ def test_occurrences_keep_same_family_and_distinct_as_of_rows() -> None:
         at.isoformat(),
         (at + timedelta(days=1)).isoformat(),
     ]
+
+
+def test_lineage_scope_and_as_of_hide_cross_scope_and_future_members() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    at = datetime(2026, 8, 30, tzinfo=UTC)
+    first = _hypothesis(session, "SOL", at)
+    future = _hypothesis(session, "SOL", at + timedelta(days=1))
+    replay = _hypothesis(session, "SOL", at, "ACCELERATED_RECONSTRUCTIVE_REPLAY")
+    family = UnifiedHypothesisRecord(
+        fingerprint="funding-template",
+        statement="SOL funding predicts returns",
+        maturity="H1_STATISTICAL_HYPOTHESIS",
+        supporting_channels=["ACADEMIC"],
+        independent_evidence_count=1,
+    )
+    session.add(family)
+    session.flush()
+    session.add_all(
+        [
+            UnifiedHypothesisMember(
+                unified_hypothesis_id=family.id, channel_hypothesis_id=row.id
+            )
+            for row in (first, future, replay)
+        ]
+    )
+    session.commit()
+
+    lineage = hypothesis_lineage(session, str(first.id), scope="PRODUCTION", as_of=at)
+
+    assert [row["id"] for row in lineage["occurrences"]] == [str(first.id)]
+
+
+def test_occurrence_identity_rejects_missing_as_of() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    session.add(
+        ChannelHypothesis(
+            channel="ACADEMIC",
+            statement="x",
+            condition="x",
+            outcome="x",
+            universe="x",
+            horizon="1h",
+            expected_direction=None,
+            required_data=[],
+            falsification_criterion="x",
+            maturity="H1_STATISTICAL_HYPOTHESIS",
+            fingerprint="x",
+            analysis_mode="PRODUCTION_LIVE",
+            availability_basis="RECEIPT_TIME",
+            as_of=None,
+        )
+    )
+    with __import__("pytest").raises(IntegrityError):
+        session.commit()
 
 
 def test_occurrence_identity_is_enforced_by_database() -> None:

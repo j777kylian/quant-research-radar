@@ -22,6 +22,17 @@ from .db import (
 Scope = Literal["PRODUCTION", "REPLAY", "ALL_WITH_PROVENANCE"]
 
 
+def _scope_statement(scope: Scope) -> Any:
+    if scope not in {"PRODUCTION", "REPLAY", "ALL_WITH_PROVENANCE"}:
+        raise ValueError("unsupported knowledge scope")
+    statement = select(ChannelHypothesis)
+    if scope == "PRODUCTION":
+        return statement.where(ChannelHypothesis.analysis_mode == "PRODUCTION_LIVE")
+    if scope == "REPLAY":
+        return statement.where(ChannelHypothesis.analysis_mode != "PRODUCTION_LIVE")
+    return statement
+
+
 def search_hypotheses(
     session: Session,
     query: str,
@@ -33,19 +44,9 @@ def search_hypotheses(
 ) -> list[dict[str, Any]]:
     """Portable lexical baseline; caller input remains bound parameters."""
     query = query.strip()
-    if scope not in {"PRODUCTION", "REPLAY", "ALL_WITH_PROVENANCE"}:
-        raise ValueError("unsupported knowledge scope")
+    statement = _scope_statement(scope)
     if not query or len(query) > 500:
         raise ValueError("query must contain 1..500 characters")
-    statement = select(ChannelHypothesis)
-    if scope == "PRODUCTION":
-        statement = statement.where(
-            ChannelHypothesis.analysis_mode == "PRODUCTION_LIVE"
-        )
-    elif scope == "REPLAY":
-        statement = statement.where(
-            ChannelHypothesis.analysis_mode != "PRODUCTION_LIVE"
-        )
     if channel:
         statement = statement.where(ChannelHypothesis.channel == channel.upper())
     if maturity:
@@ -87,8 +88,19 @@ def search_hypotheses(
     return rows
 
 
-def hypothesis_lineage(session: Session, hypothesis_id: str) -> dict[str, Any]:
-    hypothesis = session.get(ChannelHypothesis, uuid.UUID(hypothesis_id))
+def hypothesis_lineage(
+    session: Session,
+    hypothesis_id: str,
+    *,
+    scope: Scope = "PRODUCTION",
+    as_of: datetime | None = None,
+) -> dict[str, Any]:
+    statement = _scope_statement(scope).where(
+        ChannelHypothesis.id == uuid.UUID(hypothesis_id)
+    )
+    if as_of:
+        statement = statement.where(ChannelHypothesis.as_of <= normalize_utc(as_of))
+    hypothesis = session.scalar(statement)
     if hypothesis is None:
         raise ValueError("hypothesis not found")
     unified = session.scalar(
@@ -98,12 +110,20 @@ def hypothesis_lineage(session: Session, hypothesis_id: str) -> dict[str, Any]:
     )
     members: list[ChannelHypothesis] = []
     if unified:
+        member_statement = (
+            _scope_statement(scope)
+            .join(UnifiedHypothesisMember)
+            .where(UnifiedHypothesisMember.unified_hypothesis_id == unified.id)
+        )
+        if as_of:
+            member_statement = member_statement.where(
+                ChannelHypothesis.as_of <= normalize_utc(as_of)
+            )
         members = list(
             session.scalars(
-                select(ChannelHypothesis)
-                .join(UnifiedHypothesisMember)
-                .where(UnifiedHypothesisMember.unified_hypothesis_id == unified.id)
-                .order_by(ChannelHypothesis.as_of, ChannelHypothesis.created_at)
+                member_statement.order_by(
+                    ChannelHypothesis.as_of, ChannelHypothesis.created_at
+                )
             ).all()
         )
     links = []

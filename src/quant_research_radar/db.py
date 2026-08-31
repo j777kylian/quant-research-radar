@@ -226,7 +226,7 @@ class ChannelHypothesis(Base):
     fingerprint: Mapped[str] = mapped_column(String(1000), index=True, default="")
     analysis_mode: Mapped[str] = mapped_column(String(50), default="PRODUCTION_LIVE")
     availability_basis: Mapped[str] = mapped_column(String(60), default="RECEIPT_TIME")
-    as_of: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
     )
