@@ -73,8 +73,35 @@ def test_fresh_database_reaches_head(tmp_path):
     with engine.connect() as connection:
         assert (
             connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
-            == "0004_phase16a_collection_run_provenance"
+            == "0006_phase16d_candidate_provenance"
         )
     assert "requested_start" in {
         column["name"] for column in inspect(engine).get_columns("collection_runs")
     }
+
+
+def test_phase16d_migration_adds_research_intelligence_tables(tmp_path):
+    path = tmp_path / "phase16d.db"
+    url = f"sqlite:///{path}"
+
+    migrate_database(url)
+    engine = create_engine(url)
+
+    assert {
+        "evidence_sources",
+        "research_works",
+        "work_locations",
+        "channel_hypotheses",
+        "evidence_links",
+        "unified_hypotheses",
+        "unified_hypothesis_members",
+        "user_feedback",
+    } <= set(inspect(engine).get_table_names())
+    assert {"analysis_mode", "availability_basis", "as_of"} <= {
+        column["name"] for column in inspect(engine).get_columns("channel_hypotheses")
+    }
+    with engine.connect() as connection:
+        assert (
+            connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
+            == "0006_phase16d_candidate_provenance"
+        )

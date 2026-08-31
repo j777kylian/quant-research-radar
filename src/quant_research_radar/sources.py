@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from typing import Any, Protocol
 
 import httpx
@@ -99,6 +101,251 @@ class ArxivSource:
                 )
             )
         return records[:limit]
+
+
+class OpenAlexSource:
+    """Bounded targeted academic metadata discovery via the stable OpenAlex API."""
+
+    name = "openalex"
+    endpoint = "https://api.openalex.org/works"
+
+    def __init__(
+        self,
+        client: httpx.Client | None = None,
+        *,
+        now: Callable[[], datetime] | None = None,
+        lookback_days: int = 30,
+        query: str = "perpetual funding market microstructure",
+    ) -> None:
+        self.client = client or httpx.Client(
+            timeout=20, headers={"User-Agent": "quant-research-radar/0.1"}
+        )
+        self.now = now or (lambda: datetime.now(UTC))
+        self.lookback_days = lookback_days
+        self.query = query
+
+    def collect(self, limit: int, offline: bool = False) -> list[SourceRecord]:
+        if offline:
+            return []
+        today = self.now().astimezone(UTC).date()
+        start = today - timedelta(days=self.lookback_days)
+        response = self.client.get(
+            self.endpoint,
+            params={
+                "filter": f"from_publication_date:{start},to_publication_date:{today}",
+                "search": self.query,
+                "per-page": min(max(limit, 1), 100),
+                "cursor": "*",
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(
+            payload.get("results"), list
+        ):
+            raise ValueError("OpenAlex response has no results list")
+        records: list[SourceRecord] = []
+        for row in payload["results"][:limit]:
+            if not isinstance(row, dict):
+                continue
+            record = self._record(row)
+            if record is not None:
+                records.append(record)
+        return records
+
+    @staticmethod
+    def _record(row: dict[str, Any]) -> SourceRecord | None:
+        identifier = str(row.get("id", "")).rstrip("/").split("/")[-1]
+        title = str(row.get("display_name", "")).strip()
+        published = _parse_date(
+            str(row.get("publication_date", "")) + "T00:00:00+00:00"
+        )
+        if not identifier or not title or published is None:
+            return None
+        doi = str(row.get("doi") or "").removeprefix("https://doi.org/") or None
+        oa = row.get("open_access") if isinstance(row.get("open_access"), dict) else {}
+        primary = (
+            row.get("primary_location")
+            if isinstance(row.get("primary_location"), dict)
+            else {}
+        )
+        oa_url = oa.get("oa_url") if isinstance(oa, dict) else None
+        landing = primary.get("landing_page_url") if isinstance(primary, dict) else None
+        topics = [
+            str(topic.get("display_name"))
+            for topic in row.get("topics", [])
+            if isinstance(topic, dict) and topic.get("display_name")
+        ]
+        inverted = row.get("abstract_inverted_index")
+        words: list[tuple[int, str]] = []
+        if isinstance(inverted, dict):
+            for word, positions in inverted.items():
+                if isinstance(positions, list):
+                    words.extend((int(position), str(word)) for position in positions)
+        abstract = " ".join(word for _position, word in sorted(words))
+        authors = [
+            str(author.get("author", {}).get("display_name"))
+            for author in row.get("authorships", [])
+            if isinstance(author, dict)
+            and isinstance(author.get("author"), dict)
+            and author["author"].get("display_name")
+        ]
+        access_mode = "OA_FULLTEXT" if oa_url else "METADATA_ONLY"
+        return SourceRecord(
+            "ACADEMIC",
+            "openalex",
+            f"openalex:{identifier}",
+            title,
+            str(oa_url or landing or row.get("doi") or "") or None,
+            authors,
+            published,
+            abstract,
+            {
+                "doi": doi,
+                "topics": topics,
+                "access_mode": access_mode,
+                "openalex_id": identifier,
+                "source_payload": row,
+            },
+        )
+
+
+class PractitionerRssSource:
+    """Bounded public practitioner feed adapter; reposts retain primary identity."""
+
+    name = "alpha-architect"
+    endpoint = "https://alphaarchitect.com/feed/"
+
+    def __init__(self, client: httpx.Client | None = None) -> None:
+        self.client = client or httpx.Client(
+            timeout=20, headers={"User-Agent": "quant-research-radar/0.1"}
+        )
+
+    def collect(self, limit: int, offline: bool = False) -> list[SourceRecord]:
+        if offline:
+            return []
+        response = self.client.get(self.endpoint)
+        response.raise_for_status()
+        try:
+            payload = response.json()
+        except (ValueError, AttributeError):
+            return self._rss_records(response.text, limit)
+        if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
+            raise ValueError("Practitioner feed response has no items list")
+        records: list[SourceRecord] = []
+        for row in payload["items"][:limit]:
+            if not isinstance(row, dict):
+                continue
+            title = str(row.get("title", "")).strip()
+            external_id = str(row.get("id") or row.get("url") or "").strip()
+            published = _parse_date(str(row.get("published_at", "")))
+            if not title or not external_id or published is None:
+                continue
+            primary = str(row.get("primary_url") or row.get("url") or external_id)
+            records.append(
+                SourceRecord(
+                    "PRACTITIONER",
+                    self.name,
+                    external_id,
+                    title,
+                    str(row.get("url") or primary),
+                    [],
+                    published,
+                    str(row.get("summary") or ""),
+                    {
+                        "access_mode": "PUBLIC_WEB",
+                        "independence_key": primary,
+                        "primary_url": primary,
+                        "source_payload": row,
+                    },
+                )
+            )
+        return records
+
+    def _rss_records(self, text: str, limit: int) -> list[SourceRecord]:
+        try:
+            root = ET.fromstring(text)
+        except ET.ParseError as exc:
+            raise ValueError(
+                "Practitioner feed was neither JSON nor valid XML"
+            ) from exc
+        records: list[SourceRecord] = []
+        for item in root.findall(".//item")[:limit]:
+            title = (item.findtext("title") or "").strip()
+            link = (item.findtext("link") or "").strip()
+            external_id = (item.findtext("guid") or link).strip()
+            date_text = (
+                item.findtext("pubDate") or item.findtext("published") or ""
+            ).strip()
+            if not title or not external_id or not date_text:
+                continue
+            published: datetime | None
+            try:
+                published = parsedate_to_datetime(date_text).astimezone(UTC)
+            except (TypeError, ValueError):
+                published = _parse_date(date_text)
+            if published is None:
+                continue
+            records.append(
+                SourceRecord(
+                    "PRACTITIONER",
+                    self.name,
+                    external_id,
+                    title,
+                    link or None,
+                    [],
+                    published,
+                    (item.findtext("description") or "").strip(),
+                    {
+                        "access_mode": "PUBLIC_WEB",
+                        "independence_key": link or external_id,
+                        "primary_url": link or external_id,
+                        "feed": self.endpoint,
+                    },
+                )
+            )
+        return records
+
+
+def source_registry() -> list[dict[str, Any]]:
+    """Static registry makes unsupported scraping targets explicit."""
+    return [
+        {
+            "source_name": "openalex",
+            "source_class": "ACADEMIC",
+            "access_mode": "METADATA_ONLY",
+            "reliability_prior": "INDEX_METADATA",
+            "adapter_status": "READY",
+        },
+        {
+            "source_name": "arxiv",
+            "source_class": "PREPRINT",
+            "access_mode": "OA_PREPRINT",
+            "reliability_prior": "PREPRINT",
+            "adapter_status": "READY",
+        },
+        {
+            "source_name": "alpha-architect",
+            "source_class": "PRACTITIONER",
+            "access_mode": "PUBLIC_WEB",
+            "reliability_prior": "PRACTITIONER_PRIMARY",
+            "adapter_status": "READY",
+        },
+        {
+            "source_name": "ssrn",
+            "source_class": "PREPRINT",
+            "access_mode": "METADATA_ONLY",
+            "reliability_prior": "UNKNOWN",
+            "adapter_status": "UNAVAILABLE",
+        },
+        {
+            "source_name": "x",
+            "source_class": "SOCIAL",
+            "access_mode": "PUBLIC_WEB",
+            "reliability_prior": "UNKNOWN",
+            "adapter_status": "UNAVAILABLE",
+        },
+    ]
 
 
 class RepecSource:

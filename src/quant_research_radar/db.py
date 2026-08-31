@@ -98,6 +98,155 @@ class SourceItem(Base):
     )
 
 
+class EvidenceSource(Base):
+    """Registry entry for an adapter/venue, not a claim of source truth."""
+
+    __tablename__ = "evidence_sources"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    source_name: Mapped[str] = mapped_column(String(100), unique=True)
+    source_class: Mapped[str] = mapped_column(String(30))
+    venue: Mapped[str | None] = mapped_column(String(300))
+    peer_review_status: Mapped[str] = mapped_column(String(40), default="UNKNOWN")
+    domain_tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    access_mode: Mapped[str] = mapped_column(String(30))
+    reliability_prior: Mapped[str] = mapped_column(String(40))
+    provenance_class: Mapped[str] = mapped_column(String(40), default="PUBLIC")
+    adapter_status: Mapped[str] = mapped_column(String(20), default="READY")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class ResearchWork(Base):
+    """Canonical work identity shared by journal/preprint/repository locations."""
+
+    __tablename__ = "research_works"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    canonical_identity: Mapped[str] = mapped_column(String(500), unique=True)
+    normalized_title: Mapped[str] = mapped_column(String(1000))
+    doi: Mapped[str | None] = mapped_column(String(300), unique=True)
+    arxiv_id: Mapped[str | None] = mapped_column(String(100))
+    ssrn_id: Mapped[str | None] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
+class WorkLocation(Base):
+    __tablename__ = "work_locations"
+    __table_args__ = (UniqueConstraint("work_id", "source_item_id"),)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    work_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("research_works.id"), index=True
+    )
+    source_item_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("source_items.id"), index=True
+    )
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("evidence_sources.id"), index=True
+    )
+    access_mode: Mapped[str] = mapped_column(String(30))
+    version_label: Mapped[str | None] = mapped_column(String(100))
+    is_primary: Mapped[bool] = mapped_column(default=False)
+    discovered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
+class ChannelHypothesis(Base):
+    """Independent pre-fusion hypothesis emitted by one evidence channel."""
+
+    __tablename__ = "channel_hypotheses"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    channel: Mapped[str] = mapped_column(String(20), index=True)
+    statement: Mapped[str] = mapped_column(Text)
+    mechanism: Mapped[str | None] = mapped_column(Text)
+    condition: Mapped[str] = mapped_column(Text)
+    outcome: Mapped[str] = mapped_column(Text)
+    universe: Mapped[str] = mapped_column(String(500))
+    horizon: Mapped[str] = mapped_column(String(100))
+    expected_direction: Mapped[str | None] = mapped_column(String(100))
+    required_data: Mapped[list[str]] = mapped_column(JSON, default=list)
+    falsification_criterion: Mapped[str] = mapped_column(Text)
+    maturity: Mapped[str] = mapped_column(String(40))
+    status: Mapped[str] = mapped_column(String(30), default="DISCOVERED")
+    fingerprint: Mapped[str] = mapped_column(String(1000), index=True, default="")
+    analysis_mode: Mapped[str] = mapped_column(String(50), default="PRODUCTION_LIVE")
+    availability_basis: Mapped[str] = mapped_column(String(60), default="RECEIPT_TIME")
+    as_of: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
+class EvidenceLink(Base):
+    """Provenance link; relation is ORIGIN, SUPPORT, or CHALLENGE."""
+
+    __tablename__ = "evidence_links"
+    __table_args__ = (
+        UniqueConstraint("channel_hypothesis_id", "source_item_id", "relation"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    channel_hypothesis_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("channel_hypotheses.id"), index=True
+    )
+    source_item_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("source_items.id"), index=True
+    )
+    relation: Mapped[str] = mapped_column(String(20))
+    channel: Mapped[str] = mapped_column(String(20))
+    independence_key: Mapped[str] = mapped_column(String(500), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
+class UnifiedHypothesisRecord(Base):
+    __tablename__ = "unified_hypotheses"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    fingerprint: Mapped[str] = mapped_column(String(1000), unique=True)
+    statement: Mapped[str] = mapped_column(Text)
+    maturity: Mapped[str] = mapped_column(String(40))
+    supporting_channels: Mapped[list[str]] = mapped_column(JSON, default=list)
+    independent_evidence_count: Mapped[int] = mapped_column(Integer, default=0)
+    priority: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
+class UnifiedHypothesisMember(Base):
+    __tablename__ = "unified_hypothesis_members"
+    __table_args__ = (
+        UniqueConstraint("unified_hypothesis_id", "channel_hypothesis_id"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    unified_hypothesis_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("unified_hypotheses.id"), index=True
+    )
+    channel_hypothesis_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("channel_hypotheses.id"), index=True
+    )
+
+
+class UserFeedback(Base):
+    __tablename__ = "user_feedback"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    unified_hypothesis_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("unified_hypotheses.id"), index=True
+    )
+    preference: Mapped[str] = mapped_column(String(30))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
 class Claim(Base):
     __tablename__ = "claims"
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)

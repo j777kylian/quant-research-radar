@@ -1,0 +1,124 @@
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+
+from quant_research_radar.db import (
+    Base,
+    ChannelHypothesis,
+    MarketObservation,
+    SourceItem,
+    content_hash,
+    normalize_utc,
+)
+from quant_research_radar.intelligence_v2 import (
+    run_intelligence_day,
+    run_intelligence_replay,
+)
+
+
+def test_empty_production_day_does_not_fabricate_critic_pass(tmp_path: Path) -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+
+    audit = run_intelligence_day(session, tmp_path, datetime(2026, 8, 30, tzinfo=UTC))
+
+    assert audit["critics"]["evidence_auditor"]["disposition"] == "NOT_RUN"
+    assert audit["technical_status"] == "RESEARCH_UTILITY_INSUFFICIENT"
+
+
+def test_v2_day_keeps_channels_separate_and_persists_market_h1(tmp_path: Path) -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    as_of = datetime(2026, 8, 30, 23, 59, 59, tzinfo=UTC)
+    valuation = datetime(2026, 8, 30, 22, tzinfo=UTC)
+    for hour in range(31):
+        session.add(
+            MarketObservation(
+                asset="SOL",
+                observed_at=valuation - timedelta(hours=hour),
+                observation_kind="funding",
+                funding_rate=1.0 if hour == 0 else 0.0,
+                source_name="hyperliquid",
+                retrieved_at=as_of,
+            )
+        )
+        session.add(
+            MarketObservation(
+                asset="SOL",
+                observed_at=valuation - timedelta(hours=hour),
+                observation_kind="candle",
+                mark_price=95.0 if hour == 24 else 100.0,
+                source_name="hyperliquid",
+                retrieved_at=as_of,
+            )
+        )
+    session.add_all(
+        [
+            SourceItem(
+                source_type="ACADEMIC",
+                source_name="openalex",
+                external_id="academic-1",
+                canonical_url="https://doi.org/10.1/example",
+                title="Funding in perpetual markets and return predictability",
+                authors=["Researcher"],
+                published_at=as_of - timedelta(days=1),
+                retrieved_at=as_of,
+                raw_text="This market microstructure study examines funding in perpetual futures.",
+                raw_metadata={"doi": "10.1/example", "access_mode": "METADATA_ONLY"},
+                content_sha256=content_hash("academic", {}),
+            ),
+            SourceItem(
+                source_type="PRACTITIONER",
+                source_name="alpha-architect",
+                external_id="social-1",
+                canonical_url="https://example.org/original",
+                title="Funding in perpetual markets and return predictability",
+                authors=[],
+                published_at=as_of - timedelta(days=1),
+                retrieved_at=as_of,
+                raw_text="Public practitioner note on crypto market microstructure and funding.",
+                raw_metadata={
+                    "independence_key": "https://example.org/original",
+                    "access_mode": "PUBLIC_WEB",
+                },
+                content_sha256=content_hash("social", {}),
+            ),
+        ]
+    )
+    session.commit()
+
+    audit = run_intelligence_day(session, tmp_path, as_of)
+
+    persisted = session.query(ChannelHypothesis).all()
+    assert len(persisted) == 3
+    assert {item.analysis_mode for item in persisted} == {"PRODUCTION_LIVE"}
+    assert {item.availability_basis for item in persisted} == {"RECEIPT_TIME"}
+    assert {normalize_utc(item.as_of) for item in persisted if item.as_of} == {as_of}
+    assert audit["channels"]["ACADEMIC"]["hypotheses_retained"] == 1
+    assert audit["channels"]["SOCIAL"]["hypotheses_retained"] == 1
+    assert audit["channels"]["MARKET"]["hypotheses_retained"] == 1
+    assert audit["fusion"]["unified_hypotheses"] == 3
+    assert audit["fusion"]["maturity"] == [
+        "H1_STATISTICAL_HYPOTHESIS",
+        "H1_STATISTICAL_HYPOTHESIS",
+        "H1_STATISTICAL_HYPOTHESIS",
+    ]
+    assert "H3_CONVERGENT" not in audit["fusion"]["maturity"]
+    assert audit["tutor"]["concepts"] == 3
+    assert (tmp_path / "tutor.json").is_file()
+    report = (tmp_path / "executive.md").read_text()
+    assert "## Academic Radar" in report
+    assert "## Social / Practitioner Radar" in report
+    assert "## Market Radar" in report
+    assert "## Fusion Radar" in report
+    assert "## Tutor" in report
+    replay = run_intelligence_replay(session, tmp_path / "replay", [as_of])
+    assert replay["mode"] == "ACCELERATED_RECONSTRUCTIVE_REPLAY"
+    assert (
+        replay["daily_audits"][0]["availability_basis"]
+        == "SOURCE_NATIVE_AVAILABILITY_TIME"
+    )

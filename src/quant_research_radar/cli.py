@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 import re
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import cast
 
@@ -33,7 +33,14 @@ from .replay import (
     run_replay_day,
     write_summary,
 )
-from .sources import ArxivSource, HyperliquidSource, RepecSource, SourceAdapter
+from .sources import (
+    ArxivSource,
+    HyperliquidSource,
+    OpenAlexSource,
+    PractitionerRssSource,
+    RepecSource,
+    SourceAdapter,
+)
 
 
 def migrate_database(database_url: str) -> None:
@@ -123,6 +130,15 @@ def main() -> None:
     fast.add_argument("--output-dir", required=True)
     fast.add_argument("--database-url", required=True)
     fast.add_argument("--provider", choices=["fake", "deepseek"], default="deepseek")
+    v2_replay = sub.add_parser("phase16d-replay")
+    v2_replay.add_argument("--output-dir", required=True)
+    v2_replay.add_argument("--database-url", required=True)
+    v2_replay.add_argument("--start-date", type=date.fromisoformat, required=True)
+    v2_replay.add_argument("--days", type=int, default=7)
+    v2_discover = sub.add_parser("phase16d-discover")
+    v2_discover.add_argument("--output", required=True)
+    v2_discover.add_argument("--database-url", required=True)
+    v2_discover.add_argument("--limit", type=int, default=100)
     summary = sub.add_parser("rebuild-phase16a-summary")
     summary.add_argument("--output-dir", default="outputs/replay")
     summary.add_argument("--phase16a-run-id", default=None)
@@ -151,6 +167,70 @@ def main() -> None:
     )
     args = parser.parse_args()
     settings = get_settings()
+    if args.command == "phase16d-discover":
+        if not 1 <= args.limit <= 100:
+            raise SystemExit("--limit must be between 1 and 100")
+        from .discovery import ingest_records as ingest_phase16d_records
+
+        migrate_database(args.database_url)
+        session = make_session_factory(make_engine(args.database_url))()
+        retrieved_at = datetime.now(UTC)
+        records = [
+            *OpenAlexSource(now=lambda: retrieved_at).collect(args.limit),
+            *PractitionerRssSource().collect(args.limit),
+        ]
+        discovery_result = ingest_phase16d_records(
+            session, records, retrieved_at=retrieved_at
+        )
+        artifact = Path(args.output)
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(
+            json.dumps(
+                {
+                    "phase": "1.6D",
+                    "retrieved_at": retrieved_at.isoformat(),
+                    "source_status": {
+                        "openalex": "READY",
+                        "practitioner_rss": "READY",
+                        "ssrn": "UNAVAILABLE",
+                        "x": "UNAVAILABLE",
+                    },
+                    "result": discovery_result,
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        print(
+            json.dumps({"artifact": str(artifact), **discovery_result}, sort_keys=True)
+        )
+        return
+    if args.command == "phase16d-replay":
+        if not 1 <= args.days <= 7:
+            raise SystemExit("--days must be between 1 and 7")
+        from .intelligence_v2 import run_intelligence_replay
+
+        engine = make_engine(args.database_url)
+        session = make_session_factory(engine)()
+        days = [
+            datetime.combine(
+                args.start_date + timedelta(days=index), time.max, tzinfo=UTC
+            )
+            for index in range(args.days)
+        ]
+        replay_result = run_intelligence_replay(session, Path(args.output_dir), days)
+        print(
+            json.dumps(
+                {
+                    "summary": str(Path(args.output_dir) / "phase16d-summary.json"),
+                    "technical_success_count": replay_result["technical_success_count"],
+                    "mode": replay_result["mode"],
+                },
+                sort_keys=True,
+            )
+        )
+        return
     if args.command == "phase16c-fast":
         from .fast import run_fast_walk_forward
 
