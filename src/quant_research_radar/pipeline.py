@@ -299,10 +299,25 @@ def ingest(
 
 
 def ingest_records(
-    session: Session, records: list[SourceRecord], archive: RawArchive | None = None
+    session: Session,
+    records: list[SourceRecord],
+    archive: RawArchive | None = None,
+    collection_run_id: object | None = None,
 ) -> tuple[int, int]:
-    if archive is None and any(record.source_type == "MARKET" for record in records):
+    market_records = [record for record in records if record.source_type == "MARKET"]
+    auto_run: CollectionRun | None = None
+    if archive is None and market_records:
         archive = RawArchive(Path("data/raw"))
+    if market_records and collection_run_id is None:
+        auto_run = CollectionRun(
+            source="market-ingest",
+            requested=len(market_records),
+            status="RUNNING",
+            diagnostics={"retrieval_scope": {"entrypoint": "pipeline.ingest_records"}},
+        )
+        session.add(auto_run)
+        session.flush()
+        collection_run_id = auto_run.id
     inserted = 0
     duplicates = 0
     for record in records:
@@ -343,8 +358,15 @@ def ingest_records(
                     retrieved_at=normalize_utc(observation.retrieved_at),
                     source_native_timestamp=record.published_at,
                     market_observation_id=observation.id,
+                    collection_run_id=collection_run_id,
                 )
         inserted += 1
+    if auto_run is not None:
+        auto_run.retrieved = len(market_records)
+        auto_run.inserted = inserted
+        auto_run.skipped_duplicates = duplicates
+        auto_run.status = "SUCCESS"
+        auto_run.ended_at = utcnow()
     session.commit()
     return inserted, duplicates
 

@@ -8,12 +8,16 @@ from sqlalchemy.orm import Session
 from quant_research_radar.db import (
     Base,
     ChannelHypothesis,
+    EvidenceLink,
     MarketObservation,
+    RawArtifact,
+    RawArtifactReceipt,
     normalize_utc,
 )
 from quant_research_radar.intelligence_v2 import (
     AvailabilityBasis,
     market_evidence,
+    run_intelligence_day,
     run_intelligence_replay,
 )
 from quant_research_radar.llm import CriticOutput, FakeLLMClient
@@ -62,6 +66,47 @@ def test_production_availability_rejects_later_receipt_but_replay_accepts_native
     assert normalize_utc(
         session.query(MarketObservation).first().retrieved_at
     ) == as_of + timedelta(days=1)
+
+
+def test_production_recurrence_persists_one_occurrence_per_as_of(tmp_path) -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    first_as_of = datetime(2026, 8, 30, 23, 59, 59, tzinfo=UTC)
+    _seed(session, retrieved_at=first_as_of)
+    observation = session.query(MarketObservation).first()
+    artifact = RawArtifact(
+        content_sha256="a" * 64,
+        media_type="application/json",
+        byte_size=2,
+        storage_uri="data/raw/objects/aa/" + "a" * 64,
+    )
+    session.add(artifact)
+    session.flush()
+    session.add(
+        RawArtifactReceipt(
+            raw_artifact_id=artifact.id,
+            provider="hyperliquid",
+            canonical_url=None,
+            source_native_timestamp=observation.observed_at,
+            retrieved_at=first_as_of,
+            market_observation_id=observation.id,
+        )
+    )
+    session.commit()
+
+    second_as_of = first_as_of + timedelta(microseconds=1)
+    run_intelligence_day(session, tmp_path / "day1", first_as_of)
+    run_intelligence_day(session, tmp_path / "day2", second_as_of)
+
+    rows = session.query(ChannelHypothesis).all()
+    assert len(rows) == 2
+    assert len({row.fingerprint for row in rows}) == 1
+    assert {normalize_utc(row.as_of) for row in rows} == {first_as_of, second_as_of}
+    assert all(
+        link.raw_artifact_receipt_id is not None
+        for link in session.query(EvidenceLink).all()
+    )
 
 
 def test_replay_does_not_persist_reconstructive_candidates(tmp_path) -> None:

@@ -64,6 +64,7 @@ def ingest_records(
     *,
     retrieved_at: datetime,
     archive: RawArchive | None = None,
+    collection_run_id: object | None = None,
 ) -> dict[str, int]:
     """Persist source records and canonical work/version locations without inflating studies."""
     retrieved_at = normalize_utc(retrieved_at)
@@ -119,6 +120,7 @@ def ingest_records(
                     retrieved_at=retrieved_at,
                     source_native_timestamp=record.published_at,
                     source_item_id=source_item.id,
+                    collection_run_id=collection_run_id,
                 )
             except (OSError, TypeError, ValueError):
                 archive_failures += 1

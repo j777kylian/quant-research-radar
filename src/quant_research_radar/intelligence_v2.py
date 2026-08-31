@@ -117,6 +117,7 @@ def market_evidence(
                     "funding_percentile": percentile,
                     "return_24h": result,
                     "as_of": normalize_utc(as_of).isoformat(),
+                    "market_observation_ids": [str(row.id) for row in rows],
                     "availability_basis": availability_basis.value,
                     "real_receipt_pit": (
                         "CLAIMED"
@@ -303,11 +304,35 @@ def _persist_market_hypothesis(
         select(ChannelHypothesis).where(
             ChannelHypothesis.channel == Channel.MARKET.value,
             ChannelHypothesis.fingerprint == fingerprint,
+            ChannelHypothesis.analysis_mode == "PRODUCTION_LIVE",
+            ChannelHypothesis.availability_basis
+            == AvailabilityBasis.PRODUCTION_RECEIPT.value,
+            ChannelHypothesis.as_of == as_of,
         )
     )
     if existing is not None:
         return existing
     source_item = _persist_source_item(session, evidence, as_of)
+    observation_ids = [
+        uuid.UUID(value)
+        for value in evidence.metadata.get("market_observation_ids", [])
+        if isinstance(value, str)
+    ]
+    receipt = (
+        session.scalar(
+            select(RawArtifactReceipt)
+            .where(
+                RawArtifactReceipt.market_observation_id.in_(observation_ids),
+                RawArtifactReceipt.retrieved_at <= as_of,
+                RawArtifactReceipt.analysis_mode == "PRODUCTION_LIVE",
+            )
+            .order_by(
+                RawArtifactReceipt.retrieved_at.desc(), RawArtifactReceipt.id.desc()
+            )
+        )
+        if observation_ids
+        else None
+    )
     hypothesis = ChannelHypothesis(
         channel=draft.origin.value,
         statement=draft.statement,
@@ -334,6 +359,7 @@ def _persist_market_hypothesis(
             relation="ORIGIN",
             channel=Channel.MARKET.value,
             independence_key=evidence.independence_key,
+            raw_artifact_receipt_id=receipt.id if receipt else None,
         )
     )
     session.flush()
@@ -350,6 +376,10 @@ def _persist_hypothesis(
         select(ChannelHypothesis).where(
             ChannelHypothesis.channel == draft.origin.value,
             ChannelHypothesis.fingerprint == fingerprint,
+            ChannelHypothesis.analysis_mode == "PRODUCTION_LIVE",
+            ChannelHypothesis.availability_basis
+            == AvailabilityBasis.PRODUCTION_RECEIPT.value,
+            ChannelHypothesis.as_of == as_of,
         )
     )
     if existing is not None:
@@ -360,6 +390,15 @@ def _persist_hypothesis(
     source_item = session.get(SourceItem, uuid.UUID(source_item_id))
     if source_item is None:
         raise ValueError("non-market evidence source item is missing")
+    receipt = session.scalar(
+        select(RawArtifactReceipt)
+        .where(
+            RawArtifactReceipt.source_item_id == source_item.id,
+            RawArtifactReceipt.retrieved_at <= as_of,
+            RawArtifactReceipt.analysis_mode == "PRODUCTION_LIVE",
+        )
+        .order_by(RawArtifactReceipt.retrieved_at.desc(), RawArtifactReceipt.id.desc())
+    )
     hypothesis = ChannelHypothesis(
         channel=draft.origin.value,
         statement=draft.statement,
@@ -386,6 +425,7 @@ def _persist_hypothesis(
             relation="ORIGIN",
             channel=draft.origin.value,
             independence_key=evidence.independence_key,
+            raw_artifact_receipt_id=receipt.id if receipt else None,
         )
     )
     session.flush()
@@ -547,9 +587,12 @@ def run_intelligence_day(
     repeated_families = sorted(
         {_draft_family(draft) for draft in raw_drafts} & known_families
     )
-    channel_pairs = [
-        pair for pair in channel_pairs if _draft_family(pair[0]) not in known_families
-    ]
+    if not persist:
+        channel_pairs = [
+            pair
+            for pair in channel_pairs
+            if _draft_family(pair[0]) not in known_families
+        ]
     market_drafts = [
         draft for draft, _evidence in channel_pairs if draft.origin == Channel.MARKET
     ]

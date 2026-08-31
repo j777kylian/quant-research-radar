@@ -132,27 +132,32 @@ def run_live_cycle(
             start=bootstrap_start,
             end=collection_end,
         )
-        inserted_funding, _ = ingest_records(session, funding)
-        inserted_candles, _ = ingest_records(session, candles)
+        collection_run = CollectionRun(
+            source="hyperliquid",
+            requested=len(funding) + len(candles),
+            status="RUNNING",
+            requested_start=bootstrap_start,
+            requested_end=collection_end,
+            code_sha=code_sha,
+            diagnostics=hyperliquid.last_funding_diagnostics,
+        )
+        session.add(collection_run)
+        session.flush()
+        inserted_funding, _ = ingest_records(
+            session, funding, collection_run_id=collection_run.id
+        )
+        inserted_candles, _ = ingest_records(
+            session, candles, collection_run_id=collection_run.id
+        )
         counts["hyperliquid_funding"] = inserted_funding
         counts["hyperliquid_candles"] = inserted_candles
         counts["hyperliquid"] = inserted_funding + inserted_candles
         statuses["hyperliquid_transport"] = "SUCCESS"
         statuses["market_data"] = "COLLECTED"
-        session.add(
-            CollectionRun(
-                source="hyperliquid",
-                requested=len(funding) + len(candles),
-                retrieved=len(funding) + len(candles),
-                inserted=inserted_funding + inserted_candles,
-                status="SUCCESS",
-                requested_start=bootstrap_start,
-                requested_end=collection_end,
-                code_sha=code_sha,
-                diagnostics=hyperliquid.last_funding_diagnostics,
-                ended_at=datetime.now(UTC),
-            )
-        )
+        collection_run.retrieved = len(funding) + len(candles)
+        collection_run.inserted = inserted_funding + inserted_candles
+        collection_run.status = "SUCCESS"
+        collection_run.ended_at = datetime.now(UTC)
         session.commit()
         latest_receipt = session.scalar(
             select(MarketObservation.retrieved_at)

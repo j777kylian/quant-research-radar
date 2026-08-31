@@ -109,6 +109,9 @@ class RawArtifactReceipt(Base):
     market_observation_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("market_observations.id"), index=True
     )
+    collection_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("collection_runs.id"), index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
     )
@@ -202,6 +205,11 @@ class ChannelHypothesis(Base):
     """Independent pre-fusion hypothesis emitted by one evidence channel."""
 
     __tablename__ = "channel_hypotheses"
+    __table_args__ = (
+        UniqueConstraint(
+            "channel", "fingerprint", "analysis_mode", "availability_basis", "as_of"
+        ),
+    )
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     channel: Mapped[str] = mapped_column(String(20), index=True)
     statement: Mapped[str] = mapped_column(Text)
@@ -241,6 +249,9 @@ class EvidenceLink(Base):
     relation: Mapped[str] = mapped_column(String(20))
     channel: Mapped[str] = mapped_column(String(20))
     independence_key: Mapped[str] = mapped_column(String(500), index=True)
+    raw_artifact_receipt_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("raw_artifact_receipts.id"), index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
     )

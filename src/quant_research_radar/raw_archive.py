@@ -71,8 +71,9 @@ def archive_receipt(
     source_native_timestamp: datetime | None,
     source_item_id: object | None = None,
     market_observation_id: object | None = None,
+    collection_run_id: object | None = None,
     analysis_mode: str = "PRODUCTION_LIVE",
-) -> RawObject:
+) -> object:
     """Store bytes once and append a retrieval receipt without overwriting prior evidence."""
     from sqlalchemy import select
 
@@ -91,17 +92,17 @@ def archive_receipt(
         )
         session.add(artifact)
         session.flush()
-    session.add(
-        RawArtifactReceipt(
-            raw_artifact_id=artifact.id,
-            provider=provider,
-            canonical_url=canonical_url,
-            source_native_timestamp=source_native_timestamp,
-            retrieved_at=retrieved_at,
-            source_item_id=source_item_id,
-            market_observation_id=market_observation_id,
-            analysis_mode=analysis_mode,
-        )
+    receipt = RawArtifactReceipt(
+        raw_artifact_id=artifact.id,
+        provider=provider,
+        canonical_url=canonical_url,
+        source_native_timestamp=source_native_timestamp,
+        retrieved_at=retrieved_at,
+        source_item_id=source_item_id,
+        market_observation_id=market_observation_id,
+        collection_run_id=collection_run_id,
+        analysis_mode=analysis_mode,
     )
+    session.add(receipt)
     session.flush()
-    return stored
+    return receipt

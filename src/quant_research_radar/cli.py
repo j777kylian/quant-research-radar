@@ -140,6 +140,17 @@ def main() -> None:
     v2_discover.add_argument("--output", required=True)
     v2_discover.add_argument("--database-url", required=True)
     v2_discover.add_argument("--limit", type=int, default=100)
+    knowledge = sub.add_parser("knowledge")
+    knowledge.add_argument("action", choices=["search", "show"])
+    knowledge.add_argument("value")
+    knowledge.add_argument("--database-url", required=True)
+    knowledge.add_argument(
+        "--scope",
+        choices=["PRODUCTION", "REPLAY", "ALL_WITH_PROVENANCE"],
+        default="PRODUCTION",
+    )
+    knowledge.add_argument("--channel")
+    knowledge.add_argument("--maturity")
     summary = sub.add_parser("rebuild-phase16a-summary")
     summary.add_argument("--output-dir", default="outputs/replay")
     summary.add_argument("--phase16a-run-id", default=None)
@@ -168,6 +179,24 @@ def main() -> None:
     )
     args = parser.parse_args()
     settings = get_settings()
+    if args.command == "knowledge":
+        from .retrieval import hypothesis_lineage, search_hypotheses
+
+        migrate_database(args.database_url)
+        session = make_session_factory(make_engine(args.database_url))()
+        knowledge_result = (
+            search_hypotheses(
+                session,
+                args.value,
+                scope=args.scope,
+                channel=args.channel,
+                maturity=args.maturity,
+            )
+            if args.action == "search"
+            else hypothesis_lineage(session, args.value)
+        )
+        print(json.dumps(knowledge_result, indent=2, sort_keys=True, default=str))
+        return
     if args.command == "phase16d-discover":
         if not 1 <= args.limit <= 100:
             raise SystemExit("--limit must be between 1 and 100")
@@ -177,6 +206,19 @@ def main() -> None:
         migrate_database(args.database_url)
         session = make_session_factory(make_engine(args.database_url))()
         retrieved_at = datetime.now(UTC)
+        collection_run = CollectionRun(
+            source="phase16d-discover",
+            requested=args.limit,
+            status="RUNNING",
+            diagnostics={
+                "retrieval_scope": {
+                    "adapters": ["openalex", "practitioner_rss"],
+                    "per_adapter_limit": args.limit,
+                }
+            },
+        )
+        session.add(collection_run)
+        session.flush()
         records = [
             *OpenAlexSource(now=lambda: retrieved_at).collect(args.limit),
             *PractitionerRssSource().collect(args.limit),
@@ -186,7 +228,14 @@ def main() -> None:
             records,
             retrieved_at=retrieved_at,
             archive=RawArchive(Path("data/raw")),
+            collection_run_id=collection_run.id,
         )
+        collection_run.retrieved = discovery_result["discovered"]
+        collection_run.inserted = discovery_result["source_items"]
+        collection_run.failed = discovery_result["archive_failures"]
+        collection_run.status = "SUCCESS" if not collection_run.failed else "DEGRADED"
+        collection_run.ended_at = datetime.now(UTC)
+        session.commit()
         artifact = Path(args.output)
         artifact.parent.mkdir(parents=True, exist_ok=True)
         artifact.write_text(
@@ -515,30 +564,35 @@ def main() -> None:
             history_records = source.collect_history(
                 limit, offline=args.offline, start=args.start, end=args.end
             )
-            inserted, duplicates = ingest_records(session, history_records)
             run = CollectionRun(
                 source="hyperliquid",
                 requested=limit,
-                retrieved=len(history_records),
-                inserted=inserted,
-                skipped_duplicates=duplicates,
-                status="SUCCESS",
+                status="RUNNING",
                 requested_start=args.start,
                 requested_end=args.end,
                 code_sha=os.environ.get("PHASE16A_SHA", "unknown"),
                 phase16a_run_id=args.phase16a_run_id
                 or os.environ.get("PHASE16A_RUN_ID"),
                 diagnostics=source.last_funding_diagnostics,
-                ended_at=datetime.now(UTC),
             )
             session.add(run)
-            session.commit()
+            session.flush()
+            inserted, duplicates = ingest_records(
+                session, history_records, collection_run_id=run.id
+            )
             inserted_candles, candle_duplicates = ingest_records(
                 session,
                 source.collect_candles(
                     limit, offline=args.offline, start=args.start, end=args.end
                 ),
+                collection_run_id=run.id,
             )
+            run.retrieved = len(history_records)
+            run.inserted = inserted + inserted_candles
+            run.skipped_duplicates = duplicates + candle_duplicates
+            run.status = "SUCCESS"
+            run.ended_at = datetime.now(UTC)
+            session.commit()
             print(
                 json.dumps(
                     {
