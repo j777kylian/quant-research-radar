@@ -318,22 +318,22 @@ def _persist_market_hypothesis(
         for value in evidence.metadata.get("market_observation_ids", [])
         if isinstance(value, str)
     ]
-    receipt = (
-        session.scalar(
-            select(RawArtifactReceipt)
-            .where(
-                RawArtifactReceipt.market_observation_id.in_(observation_ids),
-                RawArtifactReceipt.retrieved_at <= as_of,
-                RawArtifactReceipt.analysis_mode == "PRODUCTION_LIVE",
-            )
-            .order_by(
-                RawArtifactReceipt.retrieved_at.desc(), RawArtifactReceipt.id.desc()
-            )
+    receipts = session.scalars(
+        select(RawArtifactReceipt)
+        .where(
+            RawArtifactReceipt.market_observation_id.in_(observation_ids),
+            RawArtifactReceipt.retrieved_at <= as_of,
+            RawArtifactReceipt.analysis_mode == "PRODUCTION_LIVE",
+            RawArtifactReceipt.collection_run_id.is_not(None),
         )
-        if observation_ids
-        else None
-    )
-    if receipt is None or receipt.collection_run_id is None:
+        .order_by(RawArtifactReceipt.retrieved_at.desc(), RawArtifactReceipt.id.desc())
+    ).all()
+    if len({receipt.market_observation_id for receipt in receipts}) != len(
+        observation_ids
+    ):
+        raise ValueError("market evidence requires archived receipts for every input")
+    receipt = receipts[0] if receipts else None
+    if receipt is None:
         raise ValueError(
             "market evidence requires an archived receipt bound to a collection run"
         )

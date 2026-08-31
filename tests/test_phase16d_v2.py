@@ -114,18 +114,18 @@ def test_v2_day_keeps_channels_separate_and_persists_market_h1(tmp_path: Path) -
                 collection_run_id=run.id,
             )
         )
-    observation = session.query(MarketObservation).first()
-    session.add(
-        RawArtifactReceipt(
-            raw_artifact_id=artifact.id,
-            provider="hyperliquid",
-            canonical_url=None,
-            source_native_timestamp=observation.observed_at,
-            retrieved_at=as_of,
-            market_observation_id=observation.id,
-            collection_run_id=run.id,
+    for observation in session.query(MarketObservation).all():
+        session.add(
+            RawArtifactReceipt(
+                raw_artifact_id=artifact.id,
+                provider="hyperliquid",
+                canonical_url=None,
+                source_native_timestamp=observation.observed_at,
+                retrieved_at=as_of,
+                market_observation_id=observation.id,
+                collection_run_id=run.id,
+            )
         )
-    )
     session.commit()
 
     audit = run_intelligence_day(session, tmp_path, as_of)

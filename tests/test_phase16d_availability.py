@@ -2,6 +2,7 @@ import warnings
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -85,17 +86,18 @@ def test_production_recurrence_persists_one_occurrence_per_as_of(tmp_path) -> No
     session.add_all([artifact, CollectionRun(source="test", status="SUCCESS")])
     session.flush()
     run = session.query(CollectionRun).one()
-    session.add(
-        RawArtifactReceipt(
-            raw_artifact_id=artifact.id,
-            provider="hyperliquid",
-            canonical_url=None,
-            source_native_timestamp=observation.observed_at,
-            retrieved_at=first_as_of,
-            market_observation_id=observation.id,
-            collection_run_id=run.id,
+    for observation in session.query(MarketObservation).all():
+        session.add(
+            RawArtifactReceipt(
+                raw_artifact_id=artifact.id,
+                provider="hyperliquid",
+                canonical_url=None,
+                source_native_timestamp=observation.observed_at,
+                retrieved_at=first_as_of,
+                market_observation_id=observation.id,
+                collection_run_id=run.id,
+            )
         )
-    )
     session.commit()
 
     second_as_of = first_as_of + timedelta(microseconds=1)
@@ -110,6 +112,39 @@ def test_production_recurrence_persists_one_occurrence_per_as_of(tmp_path) -> No
         link.raw_artifact_receipt_id is not None
         for link in session.query(EvidenceLink).all()
     )
+
+
+def test_production_rejects_partially_archived_market_inputs(tmp_path) -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    as_of = datetime(2026, 8, 30, 23, 59, 59, tzinfo=UTC)
+    _seed(session, retrieved_at=as_of)
+    observation = session.query(MarketObservation).first()
+    artifact = RawArtifact(
+        content_sha256="b" * 64,
+        media_type="application/json",
+        byte_size=2,
+        storage_uri="data/raw/objects/bb/" + "b" * 64,
+    )
+    run = CollectionRun(source="test", status="SUCCESS")
+    session.add_all([artifact, run])
+    session.flush()
+    session.add(
+        RawArtifactReceipt(
+            raw_artifact_id=artifact.id,
+            provider="hyperliquid",
+            canonical_url=None,
+            source_native_timestamp=observation.observed_at,
+            retrieved_at=as_of,
+            market_observation_id=observation.id,
+            collection_run_id=run.id,
+        )
+    )
+    session.commit()
+
+    with pytest.raises(ValueError, match="every input"):
+        run_intelligence_day(session, tmp_path, as_of)
 
 
 def test_replay_does_not_persist_reconstructive_candidates(tmp_path) -> None:
