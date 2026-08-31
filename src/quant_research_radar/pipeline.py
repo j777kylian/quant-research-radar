@@ -133,7 +133,7 @@ def _trusted_metric_values(
             )
         except (KeyError, TypeError, ValueError):
             return None
-        if metric_cutoff != expected_cutoff or support_cutoff > as_of:
+        if metric_cutoff != expected_cutoff or support_cutoff != as_of:
             return None
         values[metric.metric_name] = metric.metric_value
     receipt_safe = _receipt_safe_values(session, observation, as_of)

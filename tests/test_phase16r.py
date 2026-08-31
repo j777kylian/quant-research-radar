@@ -214,6 +214,24 @@ def test_market_metrics_create_deterministic_observation_only_when_rule_holds() 
             )
     session.commit()
     calculate_metrics(session, as_of=as_of)
+    target_candle = next(
+        candle
+        for candle in candles
+        if candle.asset == "BTC" and candle.observed_at.replace(tzinfo=UTC) == valuation
+    )
+    target_metrics = session.scalars(
+        select(MarketMetric).where(
+            MarketMetric.observation_id == target_candle.id,
+            MarketMetric.metric_name.in_(("funding_percentile", "return_24h")),
+        )
+    ).all()
+    for metric in target_metrics:
+        metadata = dict(metric.calculation_metadata)
+        metadata["support_receipt_cutoff"] = (as_of - timedelta(seconds=1)).isoformat()
+        metric.calculation_metadata = metadata
+    session.commit()
+    assert generate_market_observations(session, as_of) == 0
+    calculate_metrics(session, as_of=as_of)
     assert generate_market_observations(session, as_of) == 1
     assert generate_market_observations(session, as_of) == 0
     item = session.scalar(
