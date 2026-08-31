@@ -18,7 +18,7 @@ from .db import (
     make_engine,
     make_session_factory,
 )
-from .llm import DeepSeekClient, FakeLLMClient, ModelRouter
+from .llm import DeepSeekClient, FakeLLMClient, LLMClient, ModelRouter
 from .pipeline import (
     analyze,
     calculate_metrics,
@@ -119,6 +119,10 @@ def main() -> None:
     live_parser.add_argument("--cycle", type=int, required=True)
     live_parser.add_argument("--database-url", required=True)
     live_parser.add_argument("--code-sha", required=True)
+    fast = sub.add_parser("phase16c-fast")
+    fast.add_argument("--output-dir", required=True)
+    fast.add_argument("--database-url", required=True)
+    fast.add_argument("--provider", choices=["fake", "deepseek"], default="deepseek")
     summary = sub.add_parser("rebuild-phase16a-summary")
     summary.add_argument("--output-dir", default="outputs/replay")
     summary.add_argument("--phase16a-run-id", default=None)
@@ -147,6 +151,41 @@ def main() -> None:
     )
     args = parser.parse_args()
     settings = get_settings()
+    if args.command == "phase16c-fast":
+        from .fast import run_fast_walk_forward
+
+        fast_client: LLMClient
+        if args.provider == "fake":
+            fast_client = FakeLLMClient()
+        else:
+            if not settings.deepseek_api_key:
+                raise SystemExit("DEEPSEEK_API_KEY is required for Phase 1.6C-FAST")
+            fast_client = DeepSeekClient(
+                settings.deepseek_api_key,
+                ModelRouter(settings.llm_flash_model, settings.llm_pro_model),
+                settings.deepseek_base_url,
+                settings.llm_timeout_seconds,
+                settings.http_retries,
+            )
+        engine = make_engine(args.database_url)
+        session = make_session_factory(engine)()
+        fast_summary = run_fast_walk_forward(
+            session, Path(args.output_dir), fast_client
+        )
+        print(
+            json.dumps(
+                {
+                    "summary": str(
+                        Path(args.output_dir) / "phase16c-fast-summary.json"
+                    ),
+                    "technical_success_count": fast_summary["technical_success_count"],
+                    "market_fact_count": fast_summary["cross_day"]["market_fact_count"],
+                    "hypothesis_count": fast_summary["cross_day"]["hypothesis_count"],
+                },
+                sort_keys=True,
+            )
+        )
+        return
     if args.command == "live-cycle":
         if not settings.deepseek_api_key:
             raise SystemExit("DEEPSEEK_API_KEY is required for live cycle")
@@ -209,8 +248,6 @@ def main() -> None:
         print(f"SUMMARY={path}")
         return
     if args.command == "replay":
-        from .llm import FakeLLMClient
-
         cutoff = args.as_of.astimezone(UTC)
         collection_end = args.collection_end.astimezone(UTC)
         if args.provider == "fake" or (
