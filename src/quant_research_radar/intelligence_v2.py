@@ -156,7 +156,16 @@ def _source_dispositions(
         for item in session.scalars(
             select(SourceItem).where(SourceItem.source_type.in_(source_types))
         ).all():
-            disposition, reason = "RETAINED", None
+            receipt = session.scalar(
+                select(RawArtifactReceipt).where(
+                    RawArtifactReceipt.source_item_id == item.id
+                )
+            )
+            disposition, reason = (
+                ("RETAINED", None)
+                if receipt is not None
+                else ("RETAINED_LEGACY_UNARCHIVED", "NO_RAW_ARCHIVE_RECEIPT")
+            )
             if item.published_at is None or normalize_utc(item.published_at) > as_of:
                 disposition, reason = "REJECTED_AVAILABILITY", "PUBLISHED_AFTER_AS_OF"
             elif (
@@ -166,11 +175,6 @@ def _source_dispositions(
                 disposition, reason = "REJECTED_AVAILABILITY", "RETRIEVED_AFTER_AS_OF"
             elif not _quant_relevant(item):
                 disposition, reason = "REJECTED_RELEVANCE", "STRICT_TOPIC_GATE"
-            receipt = session.scalar(
-                select(RawArtifactReceipt).where(
-                    RawArtifactReceipt.source_item_id == item.id
-                )
-            )
             dispositions.append(
                 {
                     "channel": channel.value,
@@ -750,7 +754,7 @@ def _review_replay_candidate(
             )
         )
         review = CriticOutput.model_validate(review.model_dump())
-    except (AttributeError, TypeError, ValueError):
+    except Exception:
         return candidate | {
             "critic": {
                 "disposition": "REQUEST_DATA",
@@ -775,7 +779,7 @@ def _review_replay_candidate(
             "non_evidentiary": True,
             **client.tutor(candidate["statement"]).model_dump(),
         }
-    except (AttributeError, TypeError, ValueError):
+    except Exception:
         tutor = None
     return candidate | {
         "critic": {

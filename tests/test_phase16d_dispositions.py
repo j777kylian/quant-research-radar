@@ -8,7 +8,7 @@ from quant_research_radar.db import Base, SourceItem, content_hash
 from quant_research_radar.intelligence_v2 import AvailabilityBasis, run_intelligence_day
 
 
-def test_replay_audit_explains_retained_and_rejected_source_items(
+def test_replay_audit_marks_legacy_unarchived_and_rejected_source_items(
     tmp_path: Path,
 ) -> None:
     engine = create_engine("sqlite://")
@@ -57,7 +57,8 @@ def test_replay_audit_explains_retained_and_rejected_source_items(
 
     retained, future = audit["source_dispositions"]
     assert retained["channel"] == "ACADEMIC"
-    assert retained["disposition"] == "RETAINED"
+    assert retained["disposition"] == "RETAINED_LEGACY_UNARCHIVED"
+    assert retained["reason_code"] == "NO_RAW_ARCHIVE_RECEIPT"
     assert retained["published_at"] == (as_of - timedelta(days=1)).isoformat()
     assert retained["retrieved_at"] == (as_of + timedelta(days=1)).isoformat()
     assert retained["replay_availability_at"] == retained["published_at"]

@@ -209,6 +209,30 @@ def test_invalid_constructed_critic_output_fails_closed(tmp_path) -> None:
     assert candidate["tutor"] is None
 
 
+class ExplodingClient(FakeLLMClient):
+    def critique(self, hypothesis: str) -> CriticOutput:
+        raise RuntimeError("provider transport exploded")
+
+
+def test_replay_critic_transport_failure_fails_closed(tmp_path) -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    as_of = datetime(2026, 8, 30, 23, 59, 59, tzinfo=UTC)
+    _seed(session, retrieved_at=as_of + timedelta(days=1))
+
+    run_intelligence_replay(session, tmp_path, [as_of], client=ExplodingClient())
+
+    candidate = __import__("json").loads(
+        (tmp_path / "replay-candidate-ledger.json").read_text()
+    )["candidates"][0]
+    assert candidate["critic"] == {
+        "disposition": "REQUEST_DATA",
+        "reason": "critic structured output failed",
+    }
+    assert candidate["tutor"] is None
+
+
 def test_replay_critics_report_noop_without_client(tmp_path) -> None:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
