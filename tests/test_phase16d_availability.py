@@ -17,6 +17,7 @@ from quant_research_radar.db import (
     normalize_utc,
 )
 from quant_research_radar.intelligence_v2 import (
+    MODE,
     AvailabilityBasis,
     market_evidence,
     run_intelligence_day,
@@ -47,6 +48,34 @@ def _seed(session: Session, *, retrieved_at: datetime) -> None:
                 mark_price=100 + hour,
                 source_name="hyperliquid",
                 retrieved_at=retrieved_at,
+            )
+        )
+    session.commit()
+
+
+def _archive_market_receipts(
+    session: Session, *, as_of: datetime, analysis_mode: str, marker: str
+) -> None:
+    artifact = RawArtifact(
+        content_sha256=marker * 64,
+        media_type="application/json",
+        byte_size=2,
+        storage_uri=f"data/raw/objects/{marker * 2}/{marker * 64}",
+    )
+    run = CollectionRun(source="test", status="SUCCESS")
+    session.add_all([artifact, run])
+    session.flush()
+    for observation in session.query(MarketObservation).all():
+        session.add(
+            RawArtifactReceipt(
+                raw_artifact_id=artifact.id,
+                provider="hyperliquid",
+                canonical_url=None,
+                source_native_timestamp=observation.observed_at,
+                retrieved_at=as_of,
+                market_observation_id=observation.id,
+                collection_run_id=run.id,
+                analysis_mode=analysis_mode,
             )
         )
     session.commit()
@@ -195,6 +224,9 @@ def test_replay_candidate_is_critic_reviewed_and_tutored_without_production_pers
     session = Session(engine)
     as_of = datetime(2026, 8, 30, 23, 59, 59, tzinfo=UTC)
     _seed(session, retrieved_at=as_of + timedelta(days=1))
+    _archive_market_receipts(
+        session, as_of=as_of + timedelta(days=1), analysis_mode=MODE, marker="f"
+    )
 
     run_intelligence_replay(session, tmp_path, [as_of], client=FakeLLMClient())
 
@@ -217,6 +249,45 @@ class RecordingClient(FakeLLMClient):
         return super().critique(hypothesis)
 
 
+def test_production_critic_packet_excludes_replay_receipts(tmp_path) -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    as_of = datetime(2026, 8, 30, 23, 59, 59, tzinfo=UTC)
+    _seed(session, retrieved_at=as_of)
+    artifact = RawArtifact(
+        content_sha256="d" * 64,
+        media_type="application/json",
+        byte_size=2,
+        storage_uri="data/raw/objects/dd/" + "d" * 64,
+    )
+    run = CollectionRun(source="test", status="SUCCESS")
+    session.add_all([artifact, run])
+    session.flush()
+    for observation in session.query(MarketObservation).all():
+        for analysis_mode in ("PRODUCTION_LIVE", MODE):
+            session.add(
+                RawArtifactReceipt(
+                    raw_artifact_id=artifact.id,
+                    provider="hyperliquid",
+                    canonical_url=None,
+                    source_native_timestamp=observation.observed_at,
+                    retrieved_at=as_of,
+                    market_observation_id=observation.id,
+                    collection_run_id=run.id,
+                    analysis_mode=analysis_mode,
+                )
+            )
+    session.commit()
+    client = RecordingClient()
+
+    run_intelligence_day(session, tmp_path, as_of, client=client)
+
+    packet = __import__("json").loads(client.critic_input)["candidates"][0]["evidence"]
+    assert packet["analysis_mode"] == "PRODUCTION_LIVE"
+    assert len(packet["raw_artifact_receipt_id"]) == 62
+
+
 def test_replay_critic_receives_structured_candidate_context(tmp_path) -> None:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
@@ -227,18 +298,49 @@ def test_replay_critic_receives_structured_candidate_context(tmp_path) -> None:
 
     run_intelligence_replay(session, tmp_path, [as_of], client=client)
 
+    candidate = __import__("json").loads(
+        (tmp_path / "replay-candidate-ledger.json").read_text()
+    )["candidates"][0]
+    evidence = candidate["critic_evidence"]
+    assert evidence["source_identity"] == "hyperliquid"
+    assert evidence["canonical_identity"]
+    assert evidence["raw_artifact_receipt_id"] == []
+    assert evidence["collection_run_id"] == []
+    assert evidence["reviewable_summary"]
+    assert evidence["analysis_mode"] == "ACCELERATED_RECONSTRUCTIVE_REPLAY"
+    assert evidence["availability_basis"] == "SOURCE_NATIVE_AVAILABILITY_TIME"
+    assert candidate["evidence_ids"]
+    assert candidate["evidence_provenance_ids"]
+    assert candidate["evidence_independence_keys"]
+    assert candidate["evidence_observed_at"]
+    assert candidate["evidence_metadata"]
+    assert candidate["recurrence_status"] == "NEW_CANDIDATE"
+    assert candidate["condition"] and candidate["outcome"]
+    assert candidate["universe"] and candidate["horizon"]
+    assert candidate["required_data"] and candidate["falsification_criterion"]
+    assert candidate["analysis_mode"] == "ACCELERATED_RECONSTRUCTIVE_REPLAY"
+    assert candidate["critic"]["disposition"] == "REQUEST_DATA"
+    assert client.critic_input == ""
+
+
+def test_replay_critic_executes_only_with_complete_replay_receipts(tmp_path) -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    as_of = datetime(2026, 8, 30, 23, 59, 59, tzinfo=UTC)
+    _seed(session, retrieved_at=as_of + timedelta(days=1))
+    _archive_market_receipts(
+        session, as_of=as_of + timedelta(days=1), analysis_mode=MODE, marker="e"
+    )
+    client = RecordingClient()
+
+    run_intelligence_replay(session, tmp_path, [as_of], client=client)
+
     context = __import__("json").loads(client.critic_input)["candidate"]
-    assert context["origin_channel"] == "MARKET"
-    assert context["evidence_ids"]
-    assert context["evidence_provenance_ids"]
-    assert context["evidence_independence_keys"]
-    assert context["evidence_observed_at"]
-    assert context["evidence_metadata"]
-    assert context["recurrence_status"] == "NEW_CANDIDATE"
-    assert context["condition"] and context["outcome"]
-    assert context["universe"] and context["horizon"]
-    assert context["required_data"] and context["falsification_criterion"]
-    assert context["analysis_mode"] == "ACCELERATED_RECONSTRUCTIVE_REPLAY"
+    evidence = context["critic_evidence"]
+    assert evidence["raw_artifact_receipt_id"]
+    assert evidence["analysis_mode"] == MODE
+    assert evidence["pit_qualifications"]["real_receipt_pit"] == "NOT_CLAIMED"
 
 
 class MalformedClient(FakeLLMClient):
@@ -303,6 +405,9 @@ def test_replay_critic_transport_failure_fails_closed(tmp_path) -> None:
     session = Session(engine)
     as_of = datetime(2026, 8, 30, 23, 59, 59, tzinfo=UTC)
     _seed(session, retrieved_at=as_of + timedelta(days=1))
+    _archive_market_receipts(
+        session, as_of=as_of + timedelta(days=1), analysis_mode=MODE, marker="b"
+    )
 
     run_intelligence_replay(session, tmp_path, [as_of], client=ExplodingClient())
 

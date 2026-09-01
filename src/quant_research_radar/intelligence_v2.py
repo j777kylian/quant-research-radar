@@ -567,20 +567,34 @@ def _critic_evidence_packet(
 ) -> dict[str, Any]:
     """Bounded, receipt-grounded evidence supplied to the runtime Critic."""
     metadata = evidence.metadata
+    receipt_mode = (
+        "PRODUCTION_LIVE"
+        if availability_basis == AvailabilityBasis.PRODUCTION_RECEIPT
+        else MODE
+    )
+    analysis_mode = receipt_mode
+    real_receipt_pit = (
+        "CLAIMED"
+        if availability_basis == AvailabilityBasis.PRODUCTION_RECEIPT
+        else REAL_RECEIPT_PIT
+    )
     if draft.origin == Channel.MARKET:
         observation_ids = [
             uuid.UUID(value)
             for value in metadata.get("market_observation_ids", [])
             if isinstance(value, str)
         ]
-        receipts = session.scalars(
-            select(RawArtifactReceipt)
-            .where(
-                RawArtifactReceipt.market_observation_id.in_(observation_ids),
-                RawArtifactReceipt.retrieved_at <= as_of,
-                RawArtifactReceipt.collection_run_id.is_not(None),
+        receipt_statement = select(RawArtifactReceipt).where(
+            RawArtifactReceipt.market_observation_id.in_(observation_ids),
+            RawArtifactReceipt.collection_run_id.is_not(None),
+            RawArtifactReceipt.analysis_mode == receipt_mode,
+        )
+        if availability_basis == AvailabilityBasis.PRODUCTION_RECEIPT:
+            receipt_statement = receipt_statement.where(
+                RawArtifactReceipt.retrieved_at <= as_of
             )
-            .order_by(
+        receipts = session.scalars(
+            receipt_statement.order_by(
                 RawArtifactReceipt.retrieved_at.desc(), RawArtifactReceipt.id.desc()
             )
         ).all()
@@ -606,10 +620,10 @@ def _critic_evidence_packet(
             "access_mode": "PUBLIC_API",
             "independence_key": evidence.independence_key,
             "reviewable_summary": evidence.body[:4_000],
-            "analysis_mode": "PRODUCTION_LIVE",
+            "analysis_mode": analysis_mode,
             "availability_basis": availability_basis.value,
             "pit_qualifications": {
-                "real_receipt_pit": "CLAIMED",
+                "real_receipt_pit": real_receipt_pit,
                 "as_of": as_of.isoformat(),
             },
         }
@@ -624,10 +638,10 @@ def _critic_evidence_packet(
         "access_mode": metadata["access_mode"],
         "independence_key": evidence.independence_key,
         "reviewable_summary": evidence.body[:4_000],
-        "analysis_mode": metadata["analysis_mode"],
+        "analysis_mode": analysis_mode,
         "availability_basis": availability_basis.value,
         "pit_qualifications": {
-            "real_receipt_pit": "CLAIMED",
+            "real_receipt_pit": real_receipt_pit,
             "as_of": as_of.isoformat(),
         },
     }
@@ -1039,6 +1053,13 @@ def run_phase18_intelligence_cycle(
                     "evidence_independence_keys": [evidence.independence_key],
                     "evidence_observed_at": [str(evidence.observed_at)],
                     "evidence_metadata": [evidence.metadata],
+                    "critic_evidence": _critic_evidence_packet(
+                        session,
+                        draft,
+                        evidence,
+                        as_of,
+                        availability_basis,
+                    ),
                     "semantic_claim_key": draft.semantic_claim_key,
                     "recurrence_status": "NEW_CANDIDATE",
                 }
@@ -1107,9 +1128,32 @@ def run_intelligence_day(
 def _review_replay_candidate(
     candidate: dict[str, Any], client: LLMClient | None
 ) -> dict[str, Any]:
+    packet = candidate.get("critic_evidence")
+    required = (
+        "source_identity",
+        "canonical_identity",
+        "raw_artifact_receipt_id",
+        "collection_run_id",
+        "retrieved_at",
+        "source_native_availability_at",
+        "access_mode",
+        "independence_key",
+        "reviewable_summary",
+        "analysis_mode",
+        "availability_basis",
+        "pit_qualifications",
+    )
     if client is None:
         return candidate | {
             "critic": {"disposition": "NOT_RUN", "reason": "no replay critic client"},
+            "tutor": None,
+        }
+    if not isinstance(packet, dict) or any(not packet.get(field) for field in required):
+        return candidate | {
+            "critic": {
+                "disposition": "REQUEST_DATA",
+                "reason": "critic evidence packet is incomplete",
+            },
             "tutor": None,
         }
     try:
