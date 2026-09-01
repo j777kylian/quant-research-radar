@@ -226,18 +226,28 @@ class DeepSeekClient:
         )
 
     def critique(self, hypothesis: str) -> CriticOutput:
+        contract = contract_for(ContractRole.RESEARCH_CRITIC)
         return self.call(
             AnalysisRole.CRITIC,
             CriticOutput,
-            "Adversarially assess bias, confounding, PIT, and provenance limitations.",
+            (
+                f"Contract {contract.version}: perform methodological review covering look-ahead, "
+                "selection/survivorship bias, small samples, multiple testing, data snooping, "
+                "parameter mining, non-stationarity, confounding, dependence, liquidity, crowding, "
+                "publication bias, and reproducibility. Return structured reasons only."
+            ),
             hypothesis,
         )
 
     def tutor(self, hypothesis: str) -> TutorOutput:
+        contract = contract_for(ContractRole.TUTOR)
         return self.call(
             AnalysisRole.TUTOR,
             TutorOutput,
-            "Explain the quantitative concepts for a beginner.",
+            (
+                f"Contract {contract.version}: explain concepts for a beginner. Output is explicitly "
+                "non-evidentiary and must not support, reject, or alter the candidate."
+            ),
             hypothesis,
         )
 

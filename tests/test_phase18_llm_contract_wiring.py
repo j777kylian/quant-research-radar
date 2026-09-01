@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from quant_research_radar.llm import DeepSeekClient, FakeLLMClient
 
 
@@ -52,5 +54,17 @@ def test_live_analyze_delimits_external_content_and_records_contract_version() -
     assert client.prompt_version == "phase18-contracts-1"
 
 
-def test_fake_client_exposes_phase18_prompt_version() -> None:
+def test_live_critic_and_tutor_use_versioned_role_contracts() -> None:
+    transport = Client()
+    client = DeepSeekClient("not-a-real-key", "model", client=transport, retries=0)
+
+    with pytest.raises(ValueError, match="structured output failed"):
+        client.critique("A falsifiable funding hypothesis")
+    assert "phase18-research-critic-1" in transport.body["messages"][0]["content"]
+    assert "multiple testing" in transport.body["messages"][0]["content"]
+
+    with pytest.raises(ValueError, match="structured output failed"):
+        client.tutor("A falsifiable funding hypothesis")
+    assert "phase18-tutor-1" in transport.body["messages"][0]["content"]
+    assert "non-evidentiary" in transport.body["messages"][0]["content"]
     assert FakeLLMClient().prompt_version == "phase18-contracts-fixture-1"

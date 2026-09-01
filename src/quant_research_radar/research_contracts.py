@@ -102,6 +102,28 @@ class CriticDecision(BaseModel):
     provenance_sufficient: bool
 
 
+class FusionAnalysis(BaseModel):
+    semantic_equivalence: str = Field(pattern="^(SAME_FAMILY|DISTINCT|CONFLICTING)$")
+    prior_research_context_ids: list[str] = Field(default_factory=list)
+    fresh_evidence_ids: list[str] = Field(default_factory=list)
+    context_is_evidence: bool = False
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.context_is_evidence:
+            raise ValueError("prior research context cannot become fresh evidence")
+
+
+class TutorExplanation(BaseModel):
+    why_this_matters: str
+    how_it_would_be_tested: str
+    common_statistical_traps: list[str] = Field(default_factory=list)
+    non_evidentiary: bool
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.non_evidentiary:
+            raise ValueError("Tutor output must remain non-evidentiary")
+
+
 CONTRACTS = {
     ContractRole.ACADEMIC_ANALYST: ResearchContract(
         ContractRole.ACADEMIC_ANALYST,
@@ -171,6 +193,8 @@ def validate_contract_output(role: ContractRole, output: dict[str, Any]) -> Base
         ContractRole.MARKET_ANALYST: MarketAnalysis,
         ContractRole.RESEARCH_CRITIC: CriticDecision,
         ContractRole.METHODOLOGY_CRITIC: CriticDecision,
+        ContractRole.FUSION_ANALYST: FusionAnalysis,
+        ContractRole.TUTOR: TutorExplanation,
     }
     schema = schemas.get(role)
     if schema is None:

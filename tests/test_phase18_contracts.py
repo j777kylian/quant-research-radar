@@ -3,7 +3,9 @@ import pytest
 from quant_research_radar.research_contracts import (
     AcademicAnalysis,
     ContractRole,
+    FusionAnalysis,
     PractitionerAnalysis,
+    TutorExplanation,
     contract_for,
     delimit_source,
     validate_contract_output,
@@ -55,7 +57,21 @@ def test_practitioner_repost_is_not_independent_evidence() -> None:
     assert output.repost_of == output.independence_key
 
 
-def test_contract_versions_are_explicit_for_all_roles() -> None:
+def test_fusion_context_cannot_be_fresh_evidence_and_tutor_is_explanatory() -> None:
+    fusion = FusionAnalysis(
+        semantic_equivalence="SAME_FAMILY",
+        prior_research_context_ids=["family:1"],
+        fresh_evidence_ids=["source-item:1"],
+        context_is_evidence=False,
+    )
+    tutor = TutorExplanation(
+        why_this_matters="It defines an empirical question.",
+        how_it_would_be_tested="Compare a pre-specified baseline.",
+        common_statistical_traps=["multiple testing"],
+        non_evidentiary=True,
+    )
+    assert fusion.context_is_evidence is False
+    assert tutor.non_evidentiary is True
     assert {role for role in ContractRole} == set(
         contract_for(role).role for role in ContractRole
     )
