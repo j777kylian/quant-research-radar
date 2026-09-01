@@ -625,7 +625,7 @@ def _contract_versions() -> dict[str, str]:
     return {role.value: contract_for(role).version for role in ContractRole}
 
 
-def run_intelligence_day(
+def run_phase18_intelligence_cycle(
     session: Session,
     output_root: Path,
     as_of: datetime,
@@ -861,6 +861,26 @@ def run_intelligence_day(
         )
     _write_report(output_root, audit, unified_drafts)
     return audit
+
+
+def run_intelligence_day(
+    session: Session,
+    output_root: Path,
+    as_of: datetime,
+    *,
+    availability_basis: AvailabilityBasis = AvailabilityBasis.PRODUCTION_RECEIPT,
+    seen_families: set[str] | None = None,
+    persist: bool = True,
+) -> dict[str, Any]:
+    """Compatibility wrapper; all Phase 1.6D callers use the Phase 1.8 cycle."""
+    return run_phase18_intelligence_cycle(
+        session,
+        output_root,
+        as_of,
+        availability_basis=availability_basis,
+        seen_families=seen_families,
+        persist=persist,
+    )
 
 
 def _review_replay_candidate(

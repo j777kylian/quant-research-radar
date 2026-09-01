@@ -18,7 +18,23 @@ from quant_research_radar.db import (
 from quant_research_radar.intelligence_v2 import (
     run_intelligence_day,
     run_intelligence_replay,
+    run_phase18_intelligence_cycle,
 )
+
+
+def test_legacy_day_entrypoint_delegates_to_canonical_phase18_cycle(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    as_of = datetime(2026, 8, 30, tzinfo=UTC)
+
+    canonical = run_phase18_intelligence_cycle(session, tmp_path / "canonical", as_of)
+    legacy = run_intelligence_day(session, tmp_path / "legacy", as_of)
+
+    assert legacy["contract_versions"] == canonical["contract_versions"]
+    assert legacy["technical_status"] == canonical["technical_status"]
 
 
 def test_empty_production_day_does_not_fabricate_critic_pass(tmp_path: Path) -> None:
