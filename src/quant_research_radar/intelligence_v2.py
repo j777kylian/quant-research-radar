@@ -237,6 +237,23 @@ def channel_evidence(
             continue
         if not _quant_relevant(item):
             continue
+        receipt = session.scalar(
+            select(RawArtifactReceipt)
+            .where(
+                RawArtifactReceipt.source_item_id == item.id,
+                RawArtifactReceipt.retrieved_at <= as_of,
+                RawArtifactReceipt.collection_run_id.is_not(None),
+                RawArtifactReceipt.analysis_mode == "PRODUCTION_LIVE",
+            )
+            .order_by(
+                RawArtifactReceipt.retrieved_at.desc(), RawArtifactReceipt.id.desc()
+            )
+        )
+        if (
+            availability_basis == AvailabilityBasis.PRODUCTION_RECEIPT
+            and receipt is None
+        ):
+            continue
         access_mode = str(item.raw_metadata.get("access_mode", "METADATA_ONLY"))
         evidence_id = f"source-item:{item.id}"
         eligible.append(
@@ -522,7 +539,11 @@ def _write_report(root: Path, audit: dict[str, Any], drafts: list[Any]) -> None:
 
 
 def _critic_results(
-    pairs: list[tuple[HypothesisDraft, Evidence]], unified: list[Any], *, persist: bool
+    pairs: list[tuple[HypothesisDraft, Evidence]],
+    unified: list[Any],
+    *,
+    persist: bool,
+    client: LLMClient | None = None,
 ) -> dict[str, dict[str, str]]:
     if not persist:
         return {
@@ -537,21 +558,47 @@ def _critic_results(
             name: {"disposition": "NOT_RUN", "reason": "no eligible candidates"}
             for name in ("evidence_auditor", "methodology_critic", "fusion_critic")
         }
-    evidence_ok = all(
-        draft.evidence_ids and evidence.provenance_id for draft, evidence in pairs
-    )
-    method_ok = all(
-        draft.condition and draft.required_data and draft.falsification_criterion
-        for draft, _evidence in pairs
-    )
-    fusion_ok = all(
-        draft.maturity.value != "H3_CONVERGENT" or draft.semantic_claim_key
-        for draft in unified
-    )
+    if client is None:
+        return {
+            name: {"disposition": "NOT_RUN", "reason": "no production critic client"}
+            for name in ("evidence_auditor", "methodology_critic", "fusion_critic")
+        }
+    try:
+        review = CriticOutput.model_validate(
+            client.critique(
+                json.dumps(
+                    {
+                        "candidates": [
+                            {
+                                "statement": draft.statement,
+                                "condition": draft.condition,
+                                "outcome": draft.outcome,
+                                "universe": draft.universe,
+                                "horizon": draft.horizon,
+                                "required_data": draft.required_data,
+                                "falsification": draft.falsification_criterion,
+                                "evidence_ids": draft.evidence_ids,
+                                "provenance": evidence.provenance_id,
+                            }
+                            for draft, evidence in pairs
+                        ],
+                    },
+                    sort_keys=True,
+                )
+            ).model_dump()
+        )
+    except Exception:
+        return {
+            name: {
+                "disposition": "REQUEST_DATA",
+                "reason": "critic structured output failed",
+            }
+            for name in ("evidence_auditor", "methodology_critic", "fusion_critic")
+        }
+    disposition = "ACCEPT" if review.provenance_sufficient else "REQUEST_DATA"
     return {
-        "evidence_auditor": {"disposition": "ACCEPT" if evidence_ok else "REJECT"},
-        "methodology_critic": {"disposition": "ACCEPT" if method_ok else "REJECT"},
-        "fusion_critic": {"disposition": "ACCEPT" if fusion_ok else "REJECT"},
+        name: {"disposition": disposition, "reason": "; ".join(review.failure_reasons)}
+        for name in ("evidence_auditor", "methodology_critic", "fusion_critic")
     }
 
 
@@ -662,6 +709,7 @@ def run_phase18_intelligence_cycle(
     availability_basis: AvailabilityBasis = AvailabilityBasis.PRODUCTION_RECEIPT,
     seen_families: set[str] | None = None,
     persist: bool = True,
+    client: LLMClient | None = None,
 ) -> dict[str, Any]:
     """Minimal full-stack V2 day: independent empty channels cannot block market H1."""
     as_of = normalize_utc(as_of)
@@ -766,18 +814,34 @@ def run_phase18_intelligence_cycle(
                 )
     if persist:
         session.commit()
-    critics = _critic_results(channel_pairs, unified_drafts, persist=persist)
+    critics = _critic_results(
+        channel_pairs, unified_drafts, persist=persist, client=client
+    )
     _validate_phase18_critics(critics)
     tutor_accepted = persist and all(
         result["disposition"] == "ACCEPT" for result in critics.values()
     )
     tutor_concepts = (
         [
-            {"hypothesis": draft.statement, "topic": "research hypothesis testing"}
+            {
+                "hypothesis": draft.statement,
+                "topic": "research hypothesis testing",
+            }
             for draft in unified_drafts
         ]
-        if tutor_accepted
-        else []
+        if tutor_accepted and client is None
+        else (
+            [
+                {
+                    "hypothesis": draft.statement,
+                    "topic": concept.name,
+                }
+                for draft in unified_drafts
+                for concept in client.tutor(draft.statement).concepts
+            ]
+            if tutor_accepted and client is not None
+            else []
+        )
     )
     _validate_phase18_tutor(tutor_concepts)
     audit: dict[str, Any] = {
@@ -909,6 +973,7 @@ def run_intelligence_day(
     availability_basis: AvailabilityBasis = AvailabilityBasis.PRODUCTION_RECEIPT,
     seen_families: set[str] | None = None,
     persist: bool = True,
+    client: LLMClient | None = None,
 ) -> dict[str, Any]:
     """Compatibility wrapper; all Phase 1.6D callers use the Phase 1.8 cycle."""
     return run_phase18_intelligence_cycle(
@@ -918,6 +983,7 @@ def run_intelligence_day(
         availability_basis=availability_basis,
         seen_families=seen_families,
         persist=persist,
+        client=client,
     )
 
 
