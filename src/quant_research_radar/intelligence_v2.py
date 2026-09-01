@@ -625,6 +625,35 @@ def _contract_versions() -> dict[str, str]:
     return {role.value: contract_for(role).version for role in ContractRole}
 
 
+def _validate_phase18_critics(critics: dict[str, dict[str, str]]) -> None:
+    for result in critics.values():
+        disposition = result["disposition"]
+        validate_contract_output(
+            ContractRole.METHODOLOGY_CRITIC,
+            {
+                "disposition": {
+                    "ACCEPT": "ACCEPT_FOR_EMPIRICAL_TEST",
+                    "REJECT": "REJECT",
+                    "NOT_RUN": "REQUEST_DATA",
+                }.get(disposition, "REQUEST_DATA"),
+                "structured_reasons": [result.get("reason", disposition)],
+                "provenance_sufficient": disposition == "ACCEPT",
+            },
+        )
+
+
+def _validate_phase18_tutor(tutor_concepts: list[dict[str, str]]) -> None:
+    for concept in tutor_concepts:
+        validate_contract_output(
+            ContractRole.TUTOR,
+            {
+                "why_this_matters": concept["topic"],
+                "how_it_would_be_tested": concept["hypothesis"],
+                "non_evidentiary": True,
+            },
+        )
+
+
 def run_phase18_intelligence_cycle(
     session: Session,
     output_root: Path,
@@ -738,6 +767,7 @@ def run_phase18_intelligence_cycle(
     if persist:
         session.commit()
     critics = _critic_results(channel_pairs, unified_drafts, persist=persist)
+    _validate_phase18_critics(critics)
     tutor_accepted = persist and all(
         result["disposition"] == "ACCEPT" for result in critics.values()
     )
@@ -749,6 +779,7 @@ def run_phase18_intelligence_cycle(
         if tutor_accepted
         else []
     )
+    _validate_phase18_tutor(tutor_concepts)
     audit: dict[str, Any] = {
         "as_of": as_of.isoformat(),
         "mode": (
