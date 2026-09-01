@@ -63,7 +63,7 @@ def routing_rationale(scorecard: dict[str, dict[str, float]]) -> str:
 
 
 def score_analyst_output(
-    output: AnalystOutput, *, expected_relevant: bool
+    output: AnalystOutput, *, expected_relevant: bool, source_text: str | None = None
 ) -> dict[str, int]:
     """Transparent rubric, not a claim of perfect subjective research quality."""
     text = " ".join(
@@ -82,11 +82,31 @@ def score_analyst_output(
         and bool(output.possible_hypothesis.strip())
     )
     relevance = int(expected_relevant and bool(output.market.strip()))
-    faithfulness = int("association" in text or "unknown" in output.unknowns)
+    source_terms = {
+        token
+        for token in (source_text or output.actual_evidence).lower().split()
+        if len(token.strip(".,;:()")) >= 5
+    }
+    evidence_terms = {
+        token
+        for token in output.actual_evidence.lower().split()
+        if len(token.strip(".,;:()")) >= 5
+    }
+    attributed = bool(source_terms & evidence_terms)
+    correct_unknown = int(
+        output.analysis_confidence != "FULL_TEXT" and bool(output.limitations)
+    )
+    faithfulness = int(
+        attributed
+        and output.causal_status != "CAUSAL"
+        and (output.analysis_confidence == "FULL_TEXT" or correct_unknown)
+    )
     return {
         "schema_compliance": 1,
         "relevance": relevance,
         "faithfulness": faithfulness,
+        "evidence_attribution": int(attributed),
+        "correct_unknown": correct_unknown,
         "hypothesis_specificity": testable,
         "falsifiability": testable,
         "hallucination": hallucination,
