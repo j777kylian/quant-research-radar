@@ -29,6 +29,13 @@ class Client:
         return Response(self.payload)
 
 
+def test_source_registry_preserves_content_class_and_publication_status() -> None:
+    registry = {entry["source_name"]: entry for entry in source_registry()}
+    assert registry["arxiv"]["source_class"] == "ACADEMIC"
+    assert registry["arxiv"]["publication_status"] == "PREPRINT"
+    assert registry["ssrn"]["publication_status"] == "WORKING_PAPER_OR_PREPRINT"
+
+
 def test_openalex_targeted_record_preserves_doi_oa_and_topic_provenance() -> None:
     client = Client(
         {

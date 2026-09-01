@@ -329,13 +329,15 @@ def source_registry() -> list[dict[str, Any]]:
         {
             "source_name": "openalex",
             "source_class": "ACADEMIC",
+            "publication_status": "PEER_REVIEWED_OR_UNKNOWN",
             "access_mode": "METADATA_ONLY",
             "reliability_prior": "INDEX_METADATA",
             "adapter_status": "READY",
         },
         {
             "source_name": "arxiv",
-            "source_class": "PREPRINT",
+            "source_class": "ACADEMIC",
+            "publication_status": "PREPRINT",
             "access_mode": "OA_PREPRINT",
             "reliability_prior": "PREPRINT",
             "adapter_status": "READY",
@@ -349,7 +351,8 @@ def source_registry() -> list[dict[str, Any]]:
         },
         {
             "source_name": "ssrn",
-            "source_class": "PREPRINT",
+            "source_class": "ACADEMIC",
+            "publication_status": "WORKING_PAPER_OR_PREPRINT",
             "access_mode": "METADATA_ONLY",
             "reliability_prior": "UNKNOWN",
             "adapter_status": "UNAVAILABLE",
