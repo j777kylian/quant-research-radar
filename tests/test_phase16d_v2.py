@@ -139,6 +139,9 @@ def test_v2_day_keeps_channels_separate_and_persists_market_h1(tmp_path: Path) -
     assert audit["channels"]["SOCIAL"]["hypotheses_retained"] == 1
     assert audit["channels"]["MARKET"]["hypotheses_retained"] == 1
     assert audit["fusion"]["unified_hypotheses"] == 3
+    assert {entry["novelty"] for entry in audit["knowledge"]["prior_context"]} == {
+        "NEW"
+    }
     assert audit["fusion"]["maturity"] == [
         "H1_STATISTICAL_HYPOTHESIS",
         "H1_STATISTICAL_HYPOTHESIS",

@@ -35,7 +35,11 @@ from .replay import (
 )
 from .sources import (
     ArxivSource,
+    CrossrefSource,
     HyperliquidSource,
+    InstitutionalHtmlSource,
+    InstitutionalRssSource,
+    NberSource,
     OpenAlexSource,
     PractitionerRssSource,
     RepecSource,
@@ -217,7 +221,16 @@ def main() -> None:
             status="RUNNING",
             diagnostics={
                 "retrieval_scope": {
-                    "adapters": ["openalex", "arxiv", "repec", "alpha-architect"],
+                    "adapters": [
+                        "openalex",
+                        "crossref",
+                        "arxiv",
+                        "nber",
+                        "repec",
+                        "alpha-architect",
+                        "man-institute",
+                        "aqr",
+                    ],
                     "per_adapter_limit": args.limit,
                 }
             },
@@ -227,9 +240,17 @@ def main() -> None:
         records, source_status = collect_isolated(
             [
                 OpenAlexSource(now=lambda: retrieved_at),
+                CrossrefSource(),
                 ArxivSource(lookback_days=settings.arxiv_lookback_days),
+                NberSource(),
                 RepecSource(),
                 PractitionerRssSource(),
+                InstitutionalHtmlSource(
+                    name="man-institute", endpoint="https://www.man.com/insights"
+                ),
+                InstitutionalRssSource(
+                    name="aqr", endpoint="https://www.aqr.com/Insights/Research"
+                ),
             ],
             args.limit,
         )

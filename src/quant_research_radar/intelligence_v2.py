@@ -31,8 +31,10 @@ from .intelligence import (
     analyze_social,
     fuse_hypotheses,
 )
+from .knowledge_context import prior_research_context
 from .llm import CriticOutput, LLMClient
 from .metrics import funding_percentile, return_at
+from .research_contracts import ContractRole, contract_for, validate_contract_output
 
 MODE = "ACCELERATED_RECONSTRUCTIVE_REPLAY"
 PIT_BASIS = "SOURCE_NATIVE_AVAILABILITY_TIME"
@@ -559,6 +561,70 @@ def _draft_family(draft: HypothesisDraft) -> str:
     ).lower()
 
 
+def _validate_phase18_channel_draft(draft: HypothesisDraft, evidence: Evidence) -> None:
+    """Compatibility wrapper: existing deterministic generators enter contracts here."""
+    if draft.origin == Channel.MARKET:
+        validate_contract_output(
+            ContractRole.MARKET_ANALYST,
+            {
+                "state_type": "EXTREME_STATE",
+                "condition": draft.condition,
+                "outcome": draft.outcome,
+                "universe": draft.universe,
+                "horizon": draft.horizon,
+                "baseline": draft.falsification_criterion,
+                "direction": draft.expected_direction,
+                "source_evidence_ids": draft.evidence_ids,
+                "falsification_criterion": draft.falsification_criterion,
+            },
+        )
+    elif draft.origin == Channel.ACADEMIC:
+        validate_contract_output(
+            ContractRole.ACADEMIC_ANALYST,
+            {
+                "research_question": evidence.title,
+                "actual_evidence": evidence.body,
+                "causal_status": "CORRELATIONAL",
+                "analysis_confidence": "ABSTRACT_ONLY",
+                "source_evidence_ids": draft.evidence_ids,
+                "source_access_mode": str(
+                    evidence.metadata.get("access_mode", "METADATA_ONLY")
+                ),
+                "limitations": ["Source content may be metadata or abstract only."],
+                "testable_radar_hypothesis": None,
+            },
+        )
+    else:
+        validate_contract_output(
+            ContractRole.PRACTITIONER_SOCIAL_ANALYST,
+            {
+                "claim": draft.statement,
+                "original_source": True,
+                "independence_key": evidence.independence_key,
+                "supplied_evidence": evidence.body,
+                "reproducibility": "UNKNOWN",
+                "source_evidence_ids": draft.evidence_ids,
+            },
+        )
+
+
+def _validate_phase18_fusion(drafts: list[Any]) -> None:
+    for draft in drafts:
+        validate_contract_output(
+            ContractRole.FUSION_ANALYST,
+            {
+                "semantic_equivalence": "SAME_FAMILY",
+                "prior_research_context_ids": [],
+                "fresh_evidence_ids": draft.evidence_ids,
+                "context_is_evidence": False,
+            },
+        )
+
+
+def _contract_versions() -> dict[str, str]:
+    return {role.value: contract_for(role).version for role in ContractRole}
+
+
 def run_intelligence_day(
     session: Session,
     output_root: Path,
@@ -590,7 +656,19 @@ def run_intelligence_day(
         *zip(academic_drafts, academic_evidence_items, strict=True),
         *zip(social_drafts, social_evidence_items, strict=True),
     ]
+    for draft, evidence in channel_pairs:
+        _validate_phase18_channel_draft(draft, evidence)
     raw_drafts = [draft for draft, _evidence in channel_pairs]
+    prior_contexts = [
+        prior_research_context(
+            session,
+            _persistence_fingerprint(draft),
+            draft.universe,
+            as_of,
+            draft.origin.value,
+        )
+        for draft in raw_drafts
+    ]
     known_families = seen_families if seen_families is not None else set()
     repeated_families = sorted(
         {_draft_family(draft) for draft in raw_drafts} & known_families
@@ -623,6 +701,7 @@ def run_intelligence_day(
             for draft, _evidence in channel_pairs
         ]
     )
+    _validate_phase18_fusion(unified_drafts)
     for unified_draft in unified_drafts if persist else []:
         members = [
             member
@@ -677,6 +756,7 @@ def run_intelligence_day(
             if availability_basis == AvailabilityBasis.PRODUCTION_RECEIPT
             else REAL_RECEIPT_PIT
         ),
+        "contract_versions": _contract_versions(),
         "channels": {
             "ACADEMIC": {
                 "discovered": len(academic_evidence_items),
@@ -696,6 +776,18 @@ def run_intelligence_day(
             },
         },
         "source_dispositions": _source_dispositions(session, as_of, availability_basis),
+        "knowledge": {
+            "prior_context": [
+                {
+                    "hypothesis_ids": context.hypothesis_ids,
+                    "novelty": context.novelty.value,
+                    "occurrence_count": context.occurrence_count,
+                    "fresh_evidence_ids": [],
+                }
+                for context in prior_contexts
+            ],
+            "fresh_evidence_isolated": True,
+        },
         "fusion": {
             "unified_hypotheses": len(unified_drafts),
             "maturity": [draft.maturity.value for draft in unified_drafts],

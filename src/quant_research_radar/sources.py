@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -323,6 +324,175 @@ class PractitionerRssSource:
         return records
 
 
+class InstitutionalRssSource(PractitionerRssSource):
+    """A named public institutional feed; parsing stays identical to Alpha Architect."""
+
+    def __init__(
+        self, *, name: str, endpoint: str, client: httpx.Client | None = None
+    ) -> None:
+        super().__init__(client=client)
+        self.name = name
+        self.endpoint = endpoint
+
+
+class InstitutionalHtmlSource:
+    """Public institutional discovery without guessing a page's publication clock."""
+
+    def __init__(
+        self, *, name: str, endpoint: str, client: httpx.Client | None = None
+    ) -> None:
+        self.name = name
+        self.endpoint = endpoint
+        self.client = client or httpx.Client(
+            timeout=20, headers={"User-Agent": "quant-research-radar/0.1"}
+        )
+
+    def collect(self, limit: int, offline: bool = False) -> list[SourceRecord]:
+        if offline:
+            return []
+        response = self.client.get(self.endpoint)
+        response.raise_for_status()
+        records: list[SourceRecord] = []
+        pattern = re.compile(
+            r'<a[^>]+href=["\'](?P<url>[^"\']+)["\'][^>]+aria-label=["\'](?P<title>[^"\']+)["\']',
+            re.IGNORECASE,
+        )
+        for match in pattern.finditer(response.text):
+            url = match.group("url")
+            title = " ".join(match.group("title").split())
+            if not title or url in {record.canonical_url for record in records}:
+                continue
+            records.append(
+                SourceRecord(
+                    "PRACTITIONER",
+                    self.name,
+                    url,
+                    title,
+                    url,
+                    [],
+                    None,
+                    title,
+                    {
+                        "access_mode": "METADATA_ONLY",
+                        "independence_key": url,
+                        "source_payload": {"listing_url": self.endpoint, "url": url},
+                    },
+                )
+            )
+            if len(records) == limit:
+                break
+        return records
+
+
+class CrossrefSource:
+    """Bounded DOI metadata discovery; it does not claim full-text access."""
+
+    name = "crossref"
+    endpoint = "https://api.crossref.org/works"
+
+    def __init__(self, client: httpx.Client | None = None) -> None:
+        self.client = client or httpx.Client(
+            timeout=20, headers={"User-Agent": "quant-research-radar/0.1"}
+        )
+
+    def collect(self, limit: int, offline: bool = False) -> list[SourceRecord]:
+        if offline:
+            return []
+        response = self.client.get(
+            self.endpoint,
+            params={
+                "query": "perpetual funding market microstructure return predictability",
+                "rows": min(max(limit, 1), 100),
+                "select": "DOI,title,published,author,abstract,URL,type",
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()
+        items = payload.get("message", {}).get("items", [])
+        if not isinstance(items, list):
+            raise ValueError("Crossref response has no item list")
+        records: list[SourceRecord] = []
+        for row in items[:limit]:
+            if not isinstance(row, dict):
+                continue
+            doi = str(row.get("DOI") or "").strip().lower()
+            titles = row.get("title")
+            title = (
+                str(titles[0]).strip() if isinstance(titles, list) and titles else ""
+            )
+            parts = row.get("published", {}).get("date-parts", [])
+            date_parts = parts[0] if isinstance(parts, list) and parts else []
+            if not doi or not title or not date_parts:
+                continue
+            values = [int(value) for value in date_parts]
+            published = datetime(
+                values[0],
+                values[1] if len(values) > 1 else 1,
+                values[2] if len(values) > 2 else 1,
+                tzinfo=UTC,
+            )
+            authors = [
+                " ".join(
+                    part
+                    for part in (
+                        str(author.get("given") or ""),
+                        str(author.get("family") or ""),
+                    )
+                    if part
+                )
+                for author in row.get("author", [])
+                if isinstance(author, dict)
+            ]
+            records.append(
+                SourceRecord(
+                    "ACADEMIC",
+                    self.name,
+                    f"doi:{doi}",
+                    title,
+                    str(row.get("URL") or f"https://doi.org/{doi}"),
+                    authors,
+                    published,
+                    str(row.get("abstract") or ""),
+                    {
+                        "doi": doi,
+                        "access_mode": "METADATA_ONLY",
+                        "publication_status": "PEER_REVIEWED_OR_UNKNOWN",
+                        "source_payload": row,
+                    },
+                )
+            )
+        return records
+
+
+class NberSource(InstitutionalRssSource):
+    """Public NBER working-paper feed metadata; no restricted text is fetched."""
+
+    def __init__(self, client: httpx.Client | None = None) -> None:
+        super().__init__(
+            name="nber", endpoint="https://www.nber.org/rss/new.xml", client=client
+        )
+
+    def collect(self, limit: int, offline: bool = False) -> list[SourceRecord]:
+        return [
+            SourceRecord(
+                "ACADEMIC",
+                record.source_name,
+                record.external_id,
+                record.title,
+                record.canonical_url,
+                record.authors,
+                record.published_at,
+                record.raw_text,
+                record.raw_metadata
+                | {
+                    "access_mode": "METADATA_ONLY",
+                    "publication_status": "WORKING_PAPER",
+                },
+            )
+            for record in super().collect(limit, offline=offline)
+        ]
+
+
 def source_registry() -> list[dict[str, Any]]:
     """Static registry makes unsupported scraping targets explicit."""
     return [
@@ -340,6 +510,38 @@ def source_registry() -> list[dict[str, Any]]:
             "publication_status": "PREPRINT",
             "access_mode": "OA_PREPRINT",
             "reliability_prior": "PREPRINT",
+            "adapter_status": "READY",
+        },
+        {
+            "source_name": "crossref",
+            "source_class": "ACADEMIC",
+            "publication_status": "PEER_REVIEWED_OR_UNKNOWN",
+            "access_mode": "METADATA_ONLY",
+            "reliability_prior": "DOI_METADATA",
+            "adapter_status": "READY",
+        },
+        {
+            "source_name": "nber",
+            "source_class": "ACADEMIC",
+            "publication_status": "WORKING_PAPER",
+            "access_mode": "METADATA_ONLY",
+            "reliability_prior": "INSTITUTIONAL_WORKING_PAPER",
+            "adapter_status": "READY",
+        },
+        {
+            "source_name": "man-institute",
+            "source_class": "PRACTITIONER",
+            "publication_status": "UNKNOWN",
+            "access_mode": "METADATA_ONLY",
+            "reliability_prior": "INSTITUTIONAL_PRACTITIONER",
+            "adapter_status": "READY",
+        },
+        {
+            "source_name": "aqr",
+            "source_class": "PRACTITIONER",
+            "publication_status": "UNKNOWN",
+            "access_mode": "PUBLIC_WEB",
+            "reliability_prior": "INSTITUTIONAL_PRACTITIONER",
             "adapter_status": "READY",
         },
         {
