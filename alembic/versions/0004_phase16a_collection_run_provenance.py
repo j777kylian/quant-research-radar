@@ -23,6 +23,14 @@ def _columns() -> set[str]:
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    if bind.dialect.name == "postgresql":
+        op.alter_column(
+            "alembic_version",
+            "version_num",
+            existing_type=sa.String(32),
+            type_=sa.String(128),
+        )
     existing = _columns()
     for name, column_type in _COLUMNS:
         if name not in existing:
