@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -76,6 +77,15 @@ def test_canonical_cycle_quarantines_unarchived_source_before_drafting(
 
     assert audit["channels"]["ACADEMIC"]["retained"] == 0
     assert audit["channels"]["ACADEMIC"]["hypotheses_retained"] == 0
+
+
+class _RecordingCritic(FakeLLMClient):
+    def __init__(self) -> None:
+        self.packet: dict[str, object] | None = None
+
+    def critique(self, hypothesis: str):  # type: ignore[no-untyped-def]
+        self.packet = json.loads(hypothesis)
+        return super().critique(hypothesis)
 
 
 def test_v2_day_keeps_channels_separate_and_persists_market_h1(tmp_path: Path) -> None:
@@ -174,7 +184,24 @@ def test_v2_day_keeps_channels_separate_and_persists_market_h1(tmp_path: Path) -
         )
     session.commit()
 
-    audit = run_intelligence_day(session, tmp_path, as_of, client=FakeLLMClient())
+    no_critic_audit = run_intelligence_day(session, tmp_path / "no-critic", as_of)
+    assert no_critic_audit["technical_status"] == "CRITIC_NOT_RUN"
+
+    client = _RecordingCritic()
+    audit = run_intelligence_day(session, tmp_path, as_of, client=client)
+    assert client.packet is not None
+    evidence_packet = client.packet["candidates"][0]["evidence"]
+    assert evidence_packet["source_identity"]
+    assert evidence_packet["canonical_identity"]
+    assert evidence_packet["raw_artifact_receipt_id"]
+    assert evidence_packet["collection_run_id"]
+    assert evidence_packet["retrieved_at"]
+    assert evidence_packet["source_native_availability_at"]
+    assert evidence_packet["access_mode"]
+    assert evidence_packet["independence_key"]
+    assert evidence_packet["reviewable_summary"]
+    assert evidence_packet["analysis_mode"] == "PRODUCTION_LIVE"
+    assert evidence_packet["availability_basis"] == "RECEIPT_TIME"
 
     persisted = session.query(ChannelHypothesis).all()
     assert len(persisted) == 3

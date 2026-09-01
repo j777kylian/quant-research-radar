@@ -272,6 +272,26 @@ def channel_evidence(
                 observed_at=normalize_utc(item.published_at),
                 metadata={
                     "source_item_id": str(item.id),
+                    "source_identity": item.source_name,
+                    "canonical_identity": item.canonical_url or item.external_id,
+                    "raw_artifact_receipt_id": str(receipt.id) if receipt else None,
+                    "raw_artifact_id": str(receipt.raw_artifact_id)
+                    if receipt
+                    else None,
+                    "collection_run_id": str(receipt.collection_run_id)
+                    if receipt
+                    else None,
+                    "receipt_retrieved_at": normalize_utc(
+                        receipt.retrieved_at
+                    ).isoformat()
+                    if receipt
+                    else None,
+                    "source_native_availability_at": normalize_utc(
+                        receipt.source_native_timestamp
+                    ).isoformat()
+                    if receipt and receipt.source_native_timestamp
+                    else normalize_utc(item.published_at).isoformat(),
+                    "analysis_mode": receipt.analysis_mode if receipt else None,
                     "access_mode": access_mode,
                     "research_topic": item.title,
                     "availability_basis": availability_basis.value,
@@ -538,10 +558,88 @@ def _write_report(root: Path, audit: dict[str, Any], drafts: list[Any]) -> None:
     (root / "executive.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _critic_evidence_packet(
+    session: Session,
+    draft: HypothesisDraft,
+    evidence: Evidence,
+    as_of: datetime,
+    availability_basis: AvailabilityBasis,
+) -> dict[str, Any]:
+    """Bounded, receipt-grounded evidence supplied to the runtime Critic."""
+    metadata = evidence.metadata
+    if draft.origin == Channel.MARKET:
+        observation_ids = [
+            uuid.UUID(value)
+            for value in metadata.get("market_observation_ids", [])
+            if isinstance(value, str)
+        ]
+        receipts = session.scalars(
+            select(RawArtifactReceipt)
+            .where(
+                RawArtifactReceipt.market_observation_id.in_(observation_ids),
+                RawArtifactReceipt.retrieved_at <= as_of,
+                RawArtifactReceipt.collection_run_id.is_not(None),
+            )
+            .order_by(
+                RawArtifactReceipt.retrieved_at.desc(), RawArtifactReceipt.id.desc()
+            )
+        ).all()
+        return {
+            "source_identity": "hyperliquid",
+            "canonical_identity": [
+                f"market-observation:{value}" for value in observation_ids
+            ],
+            "raw_artifact_receipt_id": [str(receipt.id) for receipt in receipts],
+            "raw_artifact_id": [str(receipt.raw_artifact_id) for receipt in receipts],
+            "collection_run_id": [
+                str(receipt.collection_run_id) for receipt in receipts
+            ],
+            "retrieved_at": [
+                normalize_utc(receipt.retrieved_at).isoformat() for receipt in receipts
+            ],
+            "source_native_availability_at": [
+                normalize_utc(receipt.source_native_timestamp).isoformat()
+                if receipt.source_native_timestamp
+                else None
+                for receipt in receipts
+            ],
+            "access_mode": "PUBLIC_API",
+            "independence_key": evidence.independence_key,
+            "reviewable_summary": evidence.body[:4_000],
+            "analysis_mode": "PRODUCTION_LIVE",
+            "availability_basis": availability_basis.value,
+            "pit_qualifications": {
+                "real_receipt_pit": "CLAIMED",
+                "as_of": as_of.isoformat(),
+            },
+        }
+    return {
+        "source_identity": metadata["source_identity"],
+        "canonical_identity": metadata["canonical_identity"],
+        "raw_artifact_receipt_id": metadata["raw_artifact_receipt_id"],
+        "raw_artifact_id": metadata["raw_artifact_id"],
+        "collection_run_id": metadata["collection_run_id"],
+        "retrieved_at": metadata["receipt_retrieved_at"],
+        "source_native_availability_at": metadata["source_native_availability_at"],
+        "access_mode": metadata["access_mode"],
+        "independence_key": evidence.independence_key,
+        "reviewable_summary": evidence.body[:4_000],
+        "analysis_mode": metadata["analysis_mode"],
+        "availability_basis": availability_basis.value,
+        "pit_qualifications": {
+            "real_receipt_pit": "CLAIMED",
+            "as_of": as_of.isoformat(),
+        },
+    }
+
+
 def _critic_results(
+    session: Session,
     pairs: list[tuple[HypothesisDraft, Evidence]],
     unified: list[Any],
     *,
+    as_of: datetime,
+    availability_basis: AvailabilityBasis,
     persist: bool,
     client: LLMClient | None = None,
 ) -> dict[str, dict[str, str]]:
@@ -570,15 +668,20 @@ def _critic_results(
                     {
                         "candidates": [
                             {
-                                "statement": draft.statement,
-                                "condition": draft.condition,
-                                "outcome": draft.outcome,
-                                "universe": draft.universe,
-                                "horizon": draft.horizon,
-                                "required_data": draft.required_data,
-                                "falsification": draft.falsification_criterion,
-                                "evidence_ids": draft.evidence_ids,
-                                "provenance": evidence.provenance_id,
+                                "hypothesis_contract": {
+                                    "statement": draft.statement,
+                                    "condition": draft.condition,
+                                    "outcome": draft.outcome,
+                                    "universe": draft.universe,
+                                    "horizon": draft.horizon,
+                                    "expected_direction": draft.expected_direction,
+                                    "required_data": draft.required_data,
+                                    "falsification_criterion": draft.falsification_criterion,
+                                    "semantic_claim_key": draft.semantic_claim_key,
+                                },
+                                "evidence": _critic_evidence_packet(
+                                    session, draft, evidence, as_of, availability_basis
+                                ),
                             }
                             for draft, evidence in pairs
                         ],
@@ -815,7 +918,13 @@ def run_phase18_intelligence_cycle(
     if persist:
         session.commit()
     critics = _critic_results(
-        channel_pairs, unified_drafts, persist=persist, client=client
+        session,
+        channel_pairs,
+        unified_drafts,
+        as_of=as_of,
+        availability_basis=availability_basis,
+        persist=persist,
+        client=client,
     )
     _validate_phase18_critics(critics)
     tutor_accepted = persist and all(
@@ -947,9 +1056,17 @@ def run_phase18_intelligence_cycle(
             "RESEARCH_UTILITY_INSUFFICIENT"
             if not channel_pairs
             else (
-                "READY"
-                if all(result["disposition"] != "REJECT" for result in critics.values())
-                else "BLOCKED"
+                "CRITIC_NOT_RUN"
+                if any(
+                    result["disposition"] == "NOT_RUN" for result in critics.values()
+                )
+                else (
+                    "READY"
+                    if all(
+                        result["disposition"] == "ACCEPT" for result in critics.values()
+                    )
+                    else "CRITIC_REQUEST_DATA"
+                )
             )
         ),
     }

@@ -11,7 +11,7 @@ from typing import cast
 from alembic import command
 from alembic.config import Config
 
-from .config import get_settings
+from .config import Settings, get_settings
 from .db import (
     CollectionRun,
     get_phase16a_collection_run,
@@ -79,6 +79,19 @@ def _alembic_config(database_url: str) -> Config:
     config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
     config.set_main_option("sqlalchemy.url", database_url)
     return config
+
+
+def _phase18_client(settings: Settings) -> DeepSeekClient | None:
+    """Configured provider only; absence leaves Critic/Tutor honestly NOT_RUN."""
+    if settings.llm_provider != "deepseek" or not settings.deepseek_api_key:
+        return None
+    return DeepSeekClient(
+        settings.deepseek_api_key,
+        ModelRouter(settings.llm_flash_model, settings.llm_pro_model),
+        settings.deepseek_base_url,
+        settings.llm_timeout_seconds,
+        settings.http_retries,
+    )
 
 
 def main() -> None:
@@ -642,6 +655,7 @@ def main() -> None:
             session,
             Path(settings.report_output_dir) / "phase18-analyze",
             datetime.now(UTC),
+            client=_phase18_client(settings),
         )
         print(json.dumps(audit, default=str, sort_keys=True))
     elif args.command == "run-daily":
@@ -662,6 +676,7 @@ def main() -> None:
             session,
             Path(settings.report_output_dir) / "phase18-daily",
             datetime.now(UTC),
+            client=_phase18_client(settings),
         )
         print(
             daily_report(session, settings.report_output_dir, as_of=datetime.now(UTC))
