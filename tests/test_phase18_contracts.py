@@ -1,5 +1,6 @@
 import pytest
 
+from quant_research_radar.llm import AnalystOutput
 from quant_research_radar.research_contracts import (
     AcademicAnalysis,
     ContractRole,
@@ -38,7 +39,12 @@ def test_abstract_only_academic_analysis_cannot_claim_unavailable_detail() -> No
         statistical_significance=None,
         method=None,
     )
-    assert output.sample_period is None
+    assert {
+        "actual_evidence",
+        "causal_status",
+        "analysis_confidence",
+        "limitations",
+    } <= set(AnalystOutput.model_fields)
     assert output.effect_size is None
     assert contract_for(ContractRole.ACADEMIC_ANALYST).version.startswith("phase18-")
 
@@ -57,7 +63,33 @@ def test_practitioner_repost_is_not_independent_evidence() -> None:
     assert output.repost_of == output.independence_key
 
 
-def test_fusion_context_cannot_be_fresh_evidence_and_tutor_is_explanatory() -> None:
+def test_contract_cross_field_invariants_fail_closed() -> None:
+    with pytest.raises(ValueError, match="repost"):
+        PractitionerAnalysis(
+            claim="claim",
+            original_source=False,
+            independence_key="original",
+            supplied_evidence="none",
+            reproducibility="LOW",
+            source_evidence_ids=["source-item:1"],
+        )
+    with pytest.raises(ValueError, match="both context and fresh evidence"):
+        FusionAnalysis(
+            semantic_equivalence="SAME_FAMILY",
+            prior_research_context_ids=["source-item:1"],
+            fresh_evidence_ids=["source-item:1"],
+            context_is_evidence=False,
+        )
+    with pytest.raises(ValueError, match="complete empirical contract"):
+        AcademicAnalysis(
+            research_question="q",
+            actual_evidence="e",
+            causal_status="UNKNOWN",
+            analysis_confidence="ABSTRACT_ONLY",
+            source_evidence_ids=["source-item:1"],
+            source_access_mode="ABSTRACT_ONLY",
+            testable_radar_hypothesis="h",
+        )
     fusion = FusionAnalysis(
         semantic_equivalence="SAME_FAMILY",
         prior_research_context_ids=["family:1"],

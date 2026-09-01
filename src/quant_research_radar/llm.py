@@ -94,6 +94,12 @@ class TriageOutput(BaseModel):
 class AnalystOutput(BaseModel):
     core_question: str
     reported_finding: str
+    actual_evidence: str
+    causal_status: str = Field(pattern="^(CAUSAL|CORRELATIONAL|UNKNOWN)$")
+    analysis_confidence: str = Field(
+        pattern="^(FULL_TEXT|ABSTRACT_ONLY|METADATA_ONLY)$"
+    )
+    limitations: list[str]
     mechanism: str
     market: str
     universe: str
@@ -275,6 +281,10 @@ class FakeLLMClient:
         return AnalystOutput(
             core_question=title,
             reported_finding=text,
+            actual_evidence=text,
+            causal_status="CORRELATIONAL",
+            analysis_confidence="ABSTRACT_ONLY",
+            limitations=["Fixture content is not full-text evidence."],
             mechanism="Funding pressure may reflect positioning and liquidity imbalance.",
             market="Crypto perpetuals",
             universe="BTC, ETH, SOL",

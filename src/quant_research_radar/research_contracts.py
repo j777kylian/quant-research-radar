@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ContractRole(StrEnum):
@@ -53,8 +53,26 @@ class AcademicAnalysis(BaseModel):
     transferability_to_our_markets: str | None = None
     possible_mechanism: str | None = None
     testable_radar_hypothesis: str | None = None
+    condition: str | None = None
+    outcome: str | None = None
+    horizon: str | None = None
     required_data: list[str] = Field(default_factory=list)
     falsification_criterion: str | None = None
+
+    @model_validator(mode="after")
+    def _require_complete_test_contract(self) -> AcademicAnalysis:
+        if self.testable_radar_hypothesis and not all(
+            [
+                self.condition,
+                self.outcome,
+                self.universe,
+                self.horizon,
+                self.required_data,
+                self.falsification_criterion,
+            ]
+        ):
+            raise ValueError("testable hypothesis requires complete empirical contract")
+        return self
 
 
 class PractitionerAnalysis(BaseModel):
@@ -77,6 +95,14 @@ class PractitionerAnalysis(BaseModel):
     testable_hypothesis: str | None = None
     required_data: list[str] = Field(default_factory=list)
     falsification_criterion: str | None = None
+
+    @model_validator(mode="after")
+    def _require_repost_lineage(self) -> PractitionerAnalysis:
+        if not self.original_source and not self.repost_of:
+            raise ValueError("repost requires original source lineage")
+        if self.repost_of and self.independence_key != self.repost_of:
+            raise ValueError("repost independence key must be the original source")
+        return self
 
 
 class MarketAnalysis(BaseModel):
@@ -108,9 +134,13 @@ class FusionAnalysis(BaseModel):
     fresh_evidence_ids: list[str] = Field(default_factory=list)
     context_is_evidence: bool = False
 
-    def model_post_init(self, __context: Any) -> None:
+    @model_validator(mode="after")
+    def _reject_context_as_evidence(self) -> FusionAnalysis:
         if self.context_is_evidence:
             raise ValueError("prior research context cannot become fresh evidence")
+        if set(self.prior_research_context_ids) & set(self.fresh_evidence_ids):
+            raise ValueError("an identifier cannot be both context and fresh evidence")
+        return self
 
 
 class TutorExplanation(BaseModel):

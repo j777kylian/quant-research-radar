@@ -18,6 +18,10 @@ class Response:
                             {
                                 "core_question": "q",
                                 "reported_finding": "r",
+                                "actual_evidence": "r",
+                                "causal_status": "CORRELATIONAL",
+                                "analysis_confidence": "ABSTRACT_ONLY",
+                                "limitations": [],
                                 "mechanism": "unknown",
                                 "market": "m",
                                 "universe": "u",

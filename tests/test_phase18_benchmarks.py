@@ -14,6 +14,10 @@ def test_analyst_score_rewards_faithful_testable_output_and_penalizes_hallucinat
     good = AnalystOutput(
         core_question="Does extreme funding alter subsequent return distributions?",
         reported_finding="The abstract reports an association; no causal claim is made.",
+        actual_evidence="The abstract reports an association; no causal claim is made.",
+        causal_status="CORRELATIONAL",
+        analysis_confidence="ABSTRACT_ONLY",
+        limitations=["abstract-only"],
         mechanism="unknown",
         market="crypto perpetuals",
         universe="BTC perpetuals",
