@@ -1,4 +1,9 @@
-from quant_research_radar.benchmarks import ANALYST_CASES, score_analyst_output
+from quant_research_radar.benchmarks import (
+    ANALYST_CASES,
+    routing_rationale,
+    score_analyst_output,
+    summarize_scorecard,
+)
 from quant_research_radar.llm import AnalystOutput
 
 
@@ -33,3 +38,24 @@ def test_analyst_score_rewards_faithful_testable_output_and_penalizes_hallucinat
 
     assert score_analyst_output(good, expected_relevant=True)["hallucination"] == 0
     assert score_analyst_output(bad, expected_relevant=True)["hallucination"] == 1
+
+
+def test_scorecard_keeps_task_dimensions_separate_and_declines_unjustified_reroute() -> (
+    None
+):
+    scorecard = summarize_scorecard(
+        {
+            "flash": [
+                {"faithfulness": 1, "hallucination": 0, "schema_compliance": 1},
+                {"faithfulness": 0, "hallucination": 0, "schema_compliance": 1},
+            ],
+            "pro": [
+                {"faithfulness": 1, "hallucination": 0, "schema_compliance": 1},
+                {"faithfulness": 0, "hallucination": 0, "schema_compliance": 1},
+            ],
+        }
+    )
+    assert scorecard["flash"]["faithfulness"] == 0.5
+    assert (
+        routing_rationale(scorecard) == "KEEP_EXISTING_ROUTING_INSUFFICIENT_DIFFERENCE"
+    )

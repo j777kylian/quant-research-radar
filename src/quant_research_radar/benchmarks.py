@@ -39,6 +39,29 @@ ANALYST_CASES: tuple[AnalystCase, ...] = (
 )
 
 
+def summarize_scorecard(
+    results: dict[str, list[dict[str, int]]],
+) -> dict[str, dict[str, float]]:
+    """Average each rubric dimension independently; no synthetic overall score."""
+    return {
+        model: {
+            dimension: sum(row.get(dimension, 0) for row in rows) / len(rows)
+            for dimension in sorted({key for row in rows for key in row})
+        }
+        for model, rows in results.items()
+        if rows
+    }
+
+
+def routing_rationale(scorecard: dict[str, dict[str, float]]) -> str:
+    """Keep established bounded routing unless this corpus shows a material gain."""
+    flash = scorecard.get("flash", {})
+    pro = scorecard.get("pro", {})
+    if pro.get("faithfulness", 0.0) >= flash.get("faithfulness", 0.0) + 0.2:
+        return "PRO_FOR_ANALYST_CRITIC_MATERIAL_FAITHFULNESS_GAIN"
+    return "KEEP_EXISTING_ROUTING_INSUFFICIENT_DIFFERENCE"
+
+
 def score_analyst_output(
     output: AnalystOutput, *, expected_relevant: bool
 ) -> dict[str, int]:
