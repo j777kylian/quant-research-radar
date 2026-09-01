@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -15,7 +16,11 @@ from quant_research_radar.db import (
     UnifiedHypothesisMember,
     UnifiedHypothesisRecord,
 )
-from quant_research_radar.retrieval import hypothesis_lineage, search_hypotheses
+from quant_research_radar.retrieval import (
+    expand_query,
+    hypothesis_lineage,
+    search_hypotheses,
+)
 
 
 def _hypothesis(
@@ -133,6 +138,26 @@ def test_retrieval_scope_as_of_and_exact_archived_lineage() -> None:
     assert len(lineage["occurrences"]) == 2
     assert lineage["evidence"][0]["sha256"] == "b" * 64
     assert lineage["evidence"][0]["collection_run_id"] == str(run.id)
+
+
+def test_retrieval_expands_domain_paraphrases_and_enforces_result_bound() -> None:
+    assert expand_query("basis trade") == [
+        "basis trade",
+        "carry",
+        "futures basis",
+        "funding",
+    ]
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    at = datetime(2026, 8, 30, tzinfo=UTC)
+    for offset, asset in enumerate(("SOL", "ETH", "BTC")):
+        _hypothesis(session, asset, at + timedelta(hours=offset))
+    session.commit()
+
+    assert len(search_hypotheses(session, "crowded perp longs", limit=2)) == 2
+    with pytest.raises(ValueError, match="result limit"):
+        search_hypotheses(session, "funding", limit=0)
 
 
 def test_occurrences_keep_same_family_and_distinct_as_of_rows() -> None:

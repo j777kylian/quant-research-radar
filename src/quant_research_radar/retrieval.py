@@ -25,6 +25,9 @@ QUERY_EXPANSIONS: dict[str, tuple[str, ...]] = {
     "crowded perp longs": ("funding", "perpetual", "positioning", "crowding"),
     "mean reversion": ("reversal", "subsequent returns"),
     "short-horizon reversal": ("mean reversion", "subsequent returns"),
+    "perpetual carry": ("basis", "funding", "futures basis"),
+    "basis trade": ("carry", "futures basis", "funding"),
+    "order flow": ("order-flow imbalance", "market microstructure"),
     "order-flow imbalance": ("order flow", "market microstructure"),
     "volatility regime": ("realized volatility", "volatility"),
 }
@@ -56,8 +59,11 @@ def search_hypotheses(
     channel: str | None = None,
     maturity: str | None = None,
     as_of: datetime | None = None,
+    limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """Portable lexical baseline; caller input remains bound parameters."""
+    """Portable lexical/structural search; caller input remains bound parameters."""
+    if not 1 <= limit <= 100:
+        raise ValueError("result limit must be between 1 and 100")
     terms = expand_query(query)
     statement = _scope_statement(scope)
     if channel:
@@ -78,8 +84,10 @@ def search_hypotheses(
                 ChannelHypothesis.fingerprint.ilike(needle),
             ]
         )
-    statement = statement.where(or_(*predicates)).order_by(
-        ChannelHypothesis.as_of.desc(), ChannelHypothesis.created_at.desc()
+    statement = (
+        statement.where(or_(*predicates))
+        .order_by(ChannelHypothesis.as_of.desc(), ChannelHypothesis.created_at.desc())
+        .limit(limit)
     )
     rows = []
     for hypothesis in session.scalars(statement).all():
