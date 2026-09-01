@@ -21,6 +21,21 @@ from .db import (
 
 Scope = Literal["PRODUCTION", "REPLAY", "ALL_WITH_PROVENANCE"]
 
+QUERY_EXPANSIONS: dict[str, tuple[str, ...]] = {
+    "crowded perp longs": ("funding", "perpetual", "positioning", "crowding"),
+    "mean reversion": ("reversal", "subsequent returns"),
+    "short-horizon reversal": ("mean reversion", "subsequent returns"),
+    "order-flow imbalance": ("order flow", "market microstructure"),
+    "volatility regime": ("realized volatility", "volatility"),
+}
+
+
+def expand_query(query: str) -> list[str]:
+    normalized = " ".join(query.lower().split())
+    if not normalized or len(normalized) > 500:
+        raise ValueError("query must contain 1..500 characters")
+    return [normalized, *QUERY_EXPANSIONS.get(normalized, ())]
+
 
 def _scope_statement(scope: Scope) -> Any:
     if scope not in {"PRODUCTION", "REPLAY", "ALL_WITH_PROVENANCE"}:
@@ -43,25 +58,29 @@ def search_hypotheses(
     as_of: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Portable lexical baseline; caller input remains bound parameters."""
-    query = query.strip()
+    terms = expand_query(query)
     statement = _scope_statement(scope)
-    if not query or len(query) > 500:
-        raise ValueError("query must contain 1..500 characters")
     if channel:
         statement = statement.where(ChannelHypothesis.channel == channel.upper())
     if maturity:
         statement = statement.where(ChannelHypothesis.maturity == maturity)
     if as_of:
         statement = statement.where(ChannelHypothesis.as_of <= normalize_utc(as_of))
-    needle = f"%{query.lower()}%"
-    statement = statement.where(
-        or_(
-            ChannelHypothesis.statement.ilike(needle),
-            ChannelHypothesis.condition.ilike(needle),
-            ChannelHypothesis.outcome.ilike(needle),
-            ChannelHypothesis.universe.ilike(needle),
+    predicates = []
+    for term in terms:
+        needle = f"%{term}%"
+        predicates.extend(
+            [
+                ChannelHypothesis.statement.ilike(needle),
+                ChannelHypothesis.condition.ilike(needle),
+                ChannelHypothesis.outcome.ilike(needle),
+                ChannelHypothesis.universe.ilike(needle),
+                ChannelHypothesis.fingerprint.ilike(needle),
+            ]
         )
-    ).order_by(ChannelHypothesis.as_of.desc(), ChannelHypothesis.created_at.desc())
+    statement = statement.where(or_(*predicates)).order_by(
+        ChannelHypothesis.as_of.desc(), ChannelHypothesis.created_at.desc()
+    )
     rows = []
     for hypothesis in session.scalars(statement).all():
         unified = session.scalar(

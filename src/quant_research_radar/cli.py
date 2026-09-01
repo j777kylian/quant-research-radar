@@ -40,6 +40,7 @@ from .sources import (
     PractitionerRssSource,
     RepecSource,
     SourceAdapter,
+    collect_isolated,
 )
 
 
@@ -216,17 +217,22 @@ def main() -> None:
             status="RUNNING",
             diagnostics={
                 "retrieval_scope": {
-                    "adapters": ["openalex", "practitioner_rss"],
+                    "adapters": ["openalex", "arxiv", "repec", "alpha-architect"],
                     "per_adapter_limit": args.limit,
                 }
             },
         )
         session.add(collection_run)
         session.flush()
-        records = [
-            *OpenAlexSource(now=lambda: retrieved_at).collect(args.limit),
-            *PractitionerRssSource().collect(args.limit),
-        ]
+        records, source_status = collect_isolated(
+            [
+                OpenAlexSource(now=lambda: retrieved_at),
+                ArxivSource(lookback_days=settings.arxiv_lookback_days),
+                RepecSource(),
+                PractitionerRssSource(),
+            ],
+            args.limit,
+        )
         discovery_result = ingest_phase16d_records(
             session,
             records,
@@ -247,11 +253,10 @@ def main() -> None:
                 {
                     "phase": "1.6D",
                     "retrieved_at": retrieved_at.isoformat(),
-                    "source_status": {
-                        "openalex": "READY",
-                        "practitioner_rss": "READY",
-                        "ssrn": "UNAVAILABLE",
-                        "x": "UNAVAILABLE",
+                    "source_status": source_status
+                    | {
+                        "ssrn": "UNAVAILABLE_EXTERNAL_ACCESS",
+                        "x": "UNAVAILABLE_EXTERNAL_CREDENTIAL",
                     },
                     "result": discovery_result,
                 },

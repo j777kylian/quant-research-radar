@@ -31,6 +31,21 @@ class SourceAdapter(Protocol):
     def collect(self, limit: int, offline: bool = False) -> list[SourceRecord]: ...
 
 
+def collect_isolated(
+    adapters: list[SourceAdapter], limit: int, *, offline: bool = False
+) -> tuple[list[SourceRecord], dict[str, str]]:
+    """Bounded source fan-in; an adapter failure is data, not a channel-wide failure."""
+    records: list[SourceRecord] = []
+    status: dict[str, str] = {}
+    for adapter in adapters:
+        try:
+            records.extend(adapter.collect(limit, offline=offline))
+            status[adapter.name] = "READY"
+        except Exception:
+            status[adapter.name] = "DEGRADED"
+    return records, status
+
+
 class ArxivSource:
     name = "arxiv"
     endpoint = "https://export.arxiv.org/api/query"
