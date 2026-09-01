@@ -16,7 +16,7 @@ from .db import (
     normalize_utc,
 )
 from .raw_archive import RawArchive, archive_receipt
-from .sources import SourceRecord
+from .sources import SourceRecord, source_registry
 
 
 def _normalized_title(value: str) -> str:
@@ -34,17 +34,40 @@ def _identity(record: SourceRecord) -> tuple[str, str | None, str | None]:
 
 
 def _source(session: Session, record: SourceRecord) -> EvidenceSource:
+    profile = next(
+        (
+            candidate
+            for candidate in source_registry()
+            if candidate["source_name"] == record.source_name
+        ),
+        {},
+    )
     source = session.scalar(
         select(EvidenceSource).where(EvidenceSource.source_name == record.source_name)
     )
     if source is None:
         source = EvidenceSource(
             source_name=record.source_name,
-            source_class=record.source_type,
+            source_class=str(
+                record.raw_metadata.get("content_class")
+                or profile.get("source_class")
+                or record.source_type
+            ),
             venue=str(record.raw_metadata.get("venue") or record.source_name),
-            access_mode=str(record.raw_metadata.get("access_mode") or "METADATA_ONLY"),
+            peer_review_status=str(
+                record.raw_metadata.get("publication_status")
+                or profile.get("publication_status")
+                or "UNKNOWN"
+            ),
+            access_mode=str(
+                record.raw_metadata.get("access_mode")
+                or profile.get("access_mode")
+                or "METADATA_ONLY"
+            ),
             reliability_prior=str(
-                record.raw_metadata.get("reliability_prior") or "PUBLIC"
+                record.raw_metadata.get("reliability_prior")
+                or profile.get("reliability_prior")
+                or "PUBLIC"
             ),
             domain_tags=list(
                 record.raw_metadata.get("topics")

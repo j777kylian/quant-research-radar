@@ -4,7 +4,13 @@ from pathlib import Path
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from quant_research_radar.db import Base, RawArtifactReceipt, ResearchWork, WorkLocation
+from quant_research_radar.db import (
+    Base,
+    EvidenceSource,
+    RawArtifactReceipt,
+    ResearchWork,
+    WorkLocation,
+)
 from quant_research_radar.discovery import ingest_records
 from quant_research_radar.raw_archive import RawArchive
 from quant_research_radar.sources import SourceRecord
@@ -52,6 +58,13 @@ def test_ingest_deduplicates_versions_by_doi_but_preserves_locations() -> None:
     }
     assert len(session.scalars(select(ResearchWork)).all()) == 1
     assert len(session.scalars(select(WorkLocation)).all()) == 2
+    arxiv = session.scalar(
+        select(EvidenceSource).where(EvidenceSource.source_name == "arxiv")
+    )
+    assert arxiv is not None
+    assert arxiv.source_class == "ACADEMIC"
+    assert arxiv.peer_review_status == "PREPRINT"
+    assert arxiv.reliability_prior == "PREPRINT"
 
 
 def test_ingest_archives_lawful_source_payload_and_links_receipt(
