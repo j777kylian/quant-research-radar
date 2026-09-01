@@ -20,7 +20,6 @@ from .db import (
 )
 from .llm import DeepSeekClient, FakeLLMClient, LLMClient, ModelRouter
 from .pipeline import (
-    analyze,
     calculate_metrics,
     daily_report,
     ingest,
@@ -637,20 +636,14 @@ def main() -> None:
             print(f"Inserted {ingest(session, adapter, limit, args.offline)} records")
         calculate_metrics(session, datetime.now(UTC))
     elif args.command == "analyze":
-        analysis_client: FakeLLMClient | DeepSeekClient = (
-            FakeLLMClient()
-            if settings.llm_provider == "fake" or not settings.llm_api_key
-            else DeepSeekClient(
-                settings.deepseek_api_key or settings.llm_api_key,
-                ModelRouter(settings.llm_flash_model, settings.llm_pro_model),
-                settings.deepseek_base_url
-                if settings.llm_provider == "deepseek"
-                else settings.llm_base_url,
-                settings.llm_timeout_seconds,
-                settings.http_retries,
-            )
+        from .intelligence_v2 import run_phase18_intelligence_cycle
+
+        audit = run_phase18_intelligence_cycle(
+            session,
+            Path(settings.report_output_dir) / "phase18-analyze",
+            datetime.now(UTC),
         )
-        print(f"Created {analyze(session, analysis_client, args.limit)} hypotheses")
+        print(json.dumps(audit, default=str, sort_keys=True))
     elif args.command == "run-daily":
         arxiv, repec, hyperliquid = (
             ArxivSource(lookback_days=settings.arxiv_lookback_days),
@@ -663,7 +656,13 @@ def main() -> None:
         ingest_records(session, hyperliquid.collect_history(30, offline=args.offline))
         ingest_records(session, hyperliquid.collect_candles(30, offline=args.offline))
         calculate_metrics(session, datetime.now(UTC))
-        analyze(session, FakeLLMClient(), 20)
+        from .intelligence_v2 import run_phase18_intelligence_cycle
+
+        run_phase18_intelligence_cycle(
+            session,
+            Path(settings.report_output_dir) / "phase18-daily",
+            datetime.now(UTC),
+        )
         print(
             daily_report(session, settings.report_output_dir, as_of=datetime.now(UTC))
         )
