@@ -243,7 +243,12 @@ def channel_evidence(
                 RawArtifactReceipt.source_item_id == item.id,
                 RawArtifactReceipt.retrieved_at <= as_of,
                 RawArtifactReceipt.collection_run_id.is_not(None),
-                RawArtifactReceipt.analysis_mode == "PRODUCTION_LIVE",
+                RawArtifactReceipt.analysis_mode
+                == (
+                    "PRODUCTION_LIVE"
+                    if availability_basis == AvailabilityBasis.PRODUCTION_RECEIPT
+                    else MODE
+                ),
             )
             .order_by(
                 RawArtifactReceipt.retrieved_at.desc(), RawArtifactReceipt.id.desc()

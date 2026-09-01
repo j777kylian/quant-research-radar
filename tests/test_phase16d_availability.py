@@ -14,6 +14,8 @@ from quant_research_radar.db import (
     MarketObservation,
     RawArtifact,
     RawArtifactReceipt,
+    SourceItem,
+    content_hash,
     normalize_utc,
 )
 from quant_research_radar.intelligence_v2 import (
@@ -247,6 +249,59 @@ class RecordingClient(FakeLLMClient):
     def critique(self, hypothesis: str):
         self.critic_input = hypothesis
         return super().critique(hypothesis)
+
+
+def test_replay_critic_rejects_source_with_only_production_receipt(tmp_path) -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    as_of = datetime(2026, 8, 30, 23, 59, 59, tzinfo=UTC)
+    item = SourceItem(
+        source_type="ACADEMIC",
+        source_name="openalex",
+        external_id="replay-source",
+        canonical_url="https://doi.org/10.1/replay-source",
+        title="Funding in perpetual markets and return predictability",
+        authors=[],
+        published_at=as_of - timedelta(days=1),
+        retrieved_at=as_of + timedelta(days=1),
+        raw_text="Market microstructure study of funding in perpetual futures.",
+        raw_metadata={"access_mode": "METADATA_ONLY"},
+        content_sha256=content_hash("replay-source", {}),
+    )
+    artifact = RawArtifact(
+        content_sha256="c" * 64,
+        media_type="application/json",
+        byte_size=2,
+        storage_uri="data/raw/objects/cc/" + "c" * 64,
+    )
+    run = CollectionRun(source="test", status="SUCCESS")
+    session.add_all([item, artifact, run])
+    session.flush()
+    session.add(
+        RawArtifactReceipt(
+            raw_artifact_id=artifact.id,
+            provider="openalex",
+            canonical_url=item.canonical_url,
+            source_native_timestamp=item.published_at,
+            retrieved_at=item.retrieved_at,
+            source_item_id=item.id,
+            collection_run_id=run.id,
+            analysis_mode="PRODUCTION_LIVE",
+        )
+    )
+    session.commit()
+    client = RecordingClient()
+
+    run_intelligence_replay(session, tmp_path, [as_of], client=client)
+
+    assert client.critic_input == ""
+    ledger = __import__("json").loads(
+        (tmp_path / "replay-candidate-ledger.json").read_text()
+    )
+    candidate = ledger["candidates"][0]
+    assert candidate["critic"]["disposition"] == "REQUEST_DATA"
+    assert candidate["critic"]["reason"] == "critic evidence packet is incomplete"
 
 
 def test_production_critic_packet_excludes_replay_receipts(tmp_path) -> None:
