@@ -651,10 +651,17 @@ def run_phase18_intelligence_cycle(
     market_drafts = analyze_market(market_evidence_items)
     academic_drafts = analyze_academic(academic_evidence_items)
     social_drafts = analyze_social(social_evidence_items)
+    evidence_by_id = {
+        evidence.evidence_id: evidence
+        for evidence in [
+            *market_evidence_items,
+            *academic_evidence_items,
+            *social_evidence_items,
+        ]
+    }
     channel_pairs = [
-        *zip(market_drafts, market_evidence_items, strict=True),
-        *zip(academic_drafts, academic_evidence_items, strict=True),
-        *zip(social_drafts, social_evidence_items, strict=True),
+        (draft, evidence_by_id[draft.evidence_ids[0]])
+        for draft in [*market_drafts, *academic_drafts, *social_drafts]
     ]
     for draft, evidence in channel_pairs:
         _validate_phase18_channel_draft(draft, evidence)

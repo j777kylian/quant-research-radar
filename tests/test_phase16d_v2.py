@@ -48,6 +48,54 @@ def test_empty_production_day_does_not_fabricate_critic_pass(tmp_path: Path) -> 
     assert audit["technical_status"] == "RESEARCH_UTILITY_INSUFFICIENT"
 
 
+def test_canonical_cycle_handles_retained_source_that_cannot_form_a_draft(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    as_of = datetime(2026, 8, 30, tzinfo=UTC)
+    item = SourceItem(
+        source_type="ACADEMIC",
+        source_name="openalex",
+        external_id="empty-body",
+        canonical_url="https://example.test/empty",
+        title="Funding in perpetual markets",
+        authors=[],
+        published_at=as_of,
+        retrieved_at=as_of,
+        raw_text="",
+        raw_metadata={},
+        content_sha256=content_hash("", {}),
+    )
+    artifact = RawArtifact(
+        content_sha256="c" * 64,
+        media_type="application/json",
+        byte_size=2,
+        storage_uri="data/raw/objects/cc/" + "c" * 64,
+    )
+    run = CollectionRun(source="test", status="SUCCESS")
+    session.add_all([item, artifact, run])
+    session.flush()
+    session.add(
+        RawArtifactReceipt(
+            raw_artifact_id=artifact.id,
+            provider="openalex",
+            canonical_url=item.canonical_url,
+            source_native_timestamp=as_of,
+            retrieved_at=as_of,
+            source_item_id=item.id,
+            collection_run_id=run.id,
+        )
+    )
+    session.commit()
+
+    audit = run_phase18_intelligence_cycle(session, tmp_path, as_of)
+
+    assert audit["channels"]["ACADEMIC"]["retained"] == 1
+    assert audit["channels"]["ACADEMIC"]["hypotheses_retained"] == 0
+
+
 def test_v2_day_keeps_channels_separate_and_persists_market_h1(tmp_path: Path) -> None:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
