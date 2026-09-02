@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import calendar
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from time import sleep
@@ -30,12 +31,15 @@ CHUNK = timedelta(days=7)
 
 def safe_complete_hour(now: datetime | None = None) -> datetime:
     now = normalize_utc(now or datetime.now(UTC))
-    return now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
+    return now.replace(minute=0, second=0, microsecond=0)
 
 
 def default_backfill_start(end: datetime) -> datetime:
     end = normalize_utc(end)
-    return end.replace(year=end.year - 1)
+    return end.replace(
+        year=end.year - 1,
+        day=min(end.day, calendar.monthrange(end.year - 1, end.month)[1]),
+    )
 
 
 def _windows(start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
@@ -86,20 +90,38 @@ def _run(
         diagnostics={
             "analysis_mode": mode,
             "chunk_hours": int(CHUNK.total_seconds() // 3600),
+            "completed_windows": [],
         },
     )
     session.add(run)
     session.flush()
     inserted = duplicates = retrieved = 0
+    resumed_windows = 0
     try:
         for window_start, window_end in _windows(start, end):
+            completed = session.scalars(
+                select(CollectionRun).where(CollectionRun.source == adapter.name)
+            ).all()
+            window_key = [window_start.isoformat(), window_end.isoformat()]
+            if any(
+                item.diagnostics.get("analysis_mode") == mode
+                and window_key in item.diagnostics.get("completed_windows", [])
+                for item in completed
+            ):
+                resumed_windows += 1
+                continue
             limit = int((window_end - window_start).total_seconds() // 3600) + 2
             funding = _collect_with_retries(
                 adapter.collect_history, limit, window_start, window_end
             )
-            candles = _collect_with_retries(
-                adapter.collect_candles, limit, window_start, window_end
-            )
+            candles = [
+                record
+                for record in _collect_with_retries(
+                    adapter.collect_candles, limit, window_start, window_end
+                )
+                if record.published_at is not None
+                and record.published_at + timedelta(hours=1) <= window_end
+            ]
             for records in (funding, candles):
                 added, skipped = ingest_records(
                     session,
@@ -111,6 +133,12 @@ def _run(
                 inserted += added
                 duplicates += skipped
                 retrieved += len(records)
+            diagnostics = dict(run.diagnostics)
+            diagnostics["completed_windows"] = [
+                *diagnostics["completed_windows"],
+                window_key,
+            ]
+            run.diagnostics = diagnostics
             session.commit()
         run.retrieved = retrieved
         run.inserted = inserted
@@ -133,6 +161,7 @@ def _run(
         "inserted": inserted,
         "duplicates": duplicates,
         "retrieved": retrieved,
+        "resumed_windows": resumed_windows,
         "analysis_mode": mode,
     }
 
@@ -278,6 +307,11 @@ def run_live_market_collection(
     end: datetime,
     code_sha: str,
 ) -> dict[str, Any]:
+    end = normalize_utc(end)
+    if end > safe_complete_hour() or normalize_utc(start) < end - timedelta(hours=3):
+        raise ValueError(
+            "live collection is limited to the latest completed hourly interval"
+        )
     return _run(
         session,
         adapter,

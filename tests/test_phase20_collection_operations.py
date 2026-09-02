@@ -51,14 +51,14 @@ def test_reconstructive_backfill_creates_completed_receipt_bound_run(tmp_path) -
     run = session.get(CollectionRun, UUID(result["run_id"]))
     receipts = session.scalars(select(RawArtifactReceipt)).all()
     assert run is not None and run.status == "SUCCESS" and run.ended_at is not None
-    assert len(receipts) == 18
+    assert len(receipts) == 15
     assert {receipt.analysis_mode for receipt in receipts} == {
         "ACCELERATED_RECONSTRUCTIVE_RESEARCH"
     }
     assert {receipt.collection_run_id for receipt in receipts} == {run.id}
 
 
-def test_overlap_rerun_reuses_observations_and_adds_reconstructive_receipts(
+def test_overlap_rerun_skips_completed_window(
     tmp_path,
 ) -> None:
     from quant_research_radar.market_operations import run_historical_backfill
@@ -93,7 +93,7 @@ def test_overlap_rerun_reuses_observations_and_adds_reconstructive_receipts(
         end=start + timedelta(minutes=1),
         code_sha="one",
     )
-    run_historical_backfill(
+    second = run_historical_backfill(
         session,
         OneHour(),
         archive,
@@ -102,4 +102,5 @@ def test_overlap_rerun_reuses_observations_and_adds_reconstructive_receipts(
         code_sha="two",
     )
     assert session.scalars(select(RawArtifactReceipt)).all()
-    assert session.query(RawArtifactReceipt).count() == 12
+    assert session.query(RawArtifactReceipt).count() == 3
+    assert second["resumed_windows"] == 1

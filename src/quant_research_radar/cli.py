@@ -179,7 +179,7 @@ def main() -> None:
     operations.add_argument("--end", type=datetime.fromisoformat)
     operations.add_argument("--archive-root", default="data/raw")
     operations.add_argument("--audit-output")
-    operations.add_argument("--code-sha", required=True)
+    operations.add_argument("--code-sha", default="")
     event_study = sub.add_parser("event-study")
     event_study.add_argument("action", choices=["run", "list", "show"])
     event_study.add_argument("--database-url", required=True)
@@ -229,6 +229,8 @@ def main() -> None:
         )
         from .raw_archive import RawArchive
 
+        if args.mode != "audit" and not args.code_sha:
+            raise SystemExit("BLOCKED: --code-sha is required for collection")
         safe_end = safe_complete_hour()
         end = normalize_utc(args.end) if args.end else safe_end
         if end > safe_end:
@@ -240,7 +242,7 @@ def main() -> None:
             if args.start
             else (
                 default_backfill_start(end)
-                if args.mode == "historical"
+                if args.mode in {"historical", "audit"}
                 else end - timedelta(hours=2)
             )
         )

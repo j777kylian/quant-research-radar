@@ -26,6 +26,7 @@ data/phase16a-replay.db
 data/phase16b-live-*.db
 data/phase16r-regeneration-*.db
 data/phase16c-fast-archive-*.db
+data/phase20-market.db
 data/raw/
 .phase16a-replay.lock
 
