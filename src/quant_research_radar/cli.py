@@ -10,6 +10,7 @@ from typing import cast
 
 from alembic import command
 from alembic.config import Config
+from sqlalchemy import select
 
 from .config import Settings, get_settings
 from .db import (
@@ -17,6 +18,7 @@ from .db import (
     get_phase16a_collection_run,
     make_engine,
     make_session_factory,
+    normalize_utc,
 )
 from .llm import DeepSeekClient, FakeLLMClient, LLMClient, ModelRouter
 from .pipeline import (
@@ -169,6 +171,16 @@ def main() -> None:
     knowledge.add_argument("--channel")
     knowledge.add_argument("--maturity")
     knowledge.add_argument("--as-of", type=datetime.fromisoformat)
+    event_study = sub.add_parser("event-study")
+    event_study.add_argument("action", choices=["run", "list", "show"])
+    event_study.add_argument("--database-url", required=True)
+    event_study.add_argument("--output-dir", default="outputs/event-study")
+    event_study.add_argument("--start", type=datetime.fromisoformat)
+    event_study.add_argument("--end", type=datetime.fromisoformat)
+    event_study.add_argument("--run-id")
+    event_study.add_argument(
+        "--provider", choices=["fake", "configured"], default="configured"
+    )
     summary = sub.add_parser("rebuild-phase16a-summary")
     summary.add_argument("--output-dir", default="outputs/replay")
     summary.add_argument("--phase16a-run-id", default=None)
@@ -197,6 +209,88 @@ def main() -> None:
     )
     args = parser.parse_args()
     settings = get_settings()
+    if args.command == "event-study":
+        from .db import EventStudyResultRecord
+        from .event_study import EventStudyEngine, EventStudySpec
+
+        migrate_database(args.database_url)
+        session = make_session_factory(make_engine(args.database_url))()
+        if args.action == "list":
+            rows = session.scalars(
+                select(EventStudyResultRecord).order_by(
+                    EventStudyResultRecord.created_at
+                )
+            ).all()
+            print(
+                json.dumps(
+                    [
+                        {
+                            "result_id": str(row.id),
+                            "run_id": row.run_id,
+                            "spec_id": row.spec_id,
+                            "hypothesis_family_id": row.hypothesis_family_id,
+                            "disposition": row.disposition,
+                            "created_at": row.created_at,
+                        }
+                        for row in rows
+                    ],
+                    default=str,
+                    sort_keys=True,
+                )
+            )
+            return
+        if args.action == "show":
+            if not args.run_id:
+                raise SystemExit("event-study show requires --run-id")
+            event_result = session.scalar(
+                select(EventStudyResultRecord).where(
+                    EventStudyResultRecord.run_id == args.run_id
+                )
+            )
+            if event_result is None:
+                raise SystemExit("event-study run not found")
+            print(
+                json.dumps(
+                    {
+                        "result_id": str(event_result.id),
+                        "run_id": event_result.run_id,
+                        "spec_id": event_result.spec_id,
+                        "disposition": event_result.disposition,
+                        "effects": event_result.effects,
+                        "robustness": event_result.robustness,
+                        "methodology_critic": event_result.methodology_critic,
+                        "artifact_uri": event_result.artifact_uri,
+                    },
+                    default=str,
+                    sort_keys=True,
+                )
+            )
+            return
+        if args.start is None or args.end is None:
+            raise SystemExit("event-study run requires --start and --end")
+        start, end = normalize_utc(args.start), normalize_utc(args.end)
+        client: LLMClient | None = (
+            FakeLLMClient() if args.provider == "fake" else _phase18_client(settings)
+        )
+        spec = EventStudySpec.funding_v1(
+            hypothesis_id="EXTREME_FUNDING_FORWARD_RETURN",
+            hypothesis_family_id="EXTREME_FUNDING_FORWARD_RETURN",
+            created_at=end,
+            sample_start=start,
+            sample_end=end,
+            source_dataset="hyperliquid-bounded-history",
+            source_lineage="raw_artifact_receipts + collection_runs",
+        )
+        print(
+            json.dumps(
+                EventStudyEngine(session, spec, client=client).run(
+                    Path(args.output_dir)
+                ),
+                default=str,
+                sort_keys=True,
+            )
+        )
+        return
     if args.command == "knowledge":
         from .retrieval import hypothesis_lineage, search_hypotheses
 

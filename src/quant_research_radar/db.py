@@ -380,6 +380,57 @@ class Review(Base):
     )
 
 
+class EventStudySpecRecord(Base):
+    """Immutable serialized Phase 2.0 study contract."""
+
+    __tablename__ = "event_study_specs"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    hypothesis_id: Mapped[str] = mapped_column(String(100), index=True)
+    hypothesis_family_id: Mapped[str] = mapped_column(String(200), index=True)
+    spec_version: Mapped[str] = mapped_column(String(30))
+    spec_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    immutable_spec: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class EventStudyRun(Base):
+    __tablename__ = "event_study_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    spec_id: Mapped[str] = mapped_column(ForeignKey("event_study_specs.id"), index=True)
+    hypothesis_id: Mapped[str] = mapped_column(String(100), index=True)
+    analysis_mode: Mapped[str] = mapped_column(String(60))
+    availability_basis: Mapped[str] = mapped_column(String(80))
+    real_receipt_pit: Mapped[str] = mapped_column(String(30))
+    data_lineage: Mapped[dict[str, Any]] = mapped_column(JSON)
+    code_sha: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
+class EventStudyResultRecord(Base):
+    __tablename__ = "event_study_results"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("event_study_runs.id"), unique=True, index=True
+    )
+    spec_id: Mapped[str] = mapped_column(ForeignKey("event_study_specs.id"), index=True)
+    hypothesis_id: Mapped[str] = mapped_column(String(100), index=True)
+    hypothesis_family_id: Mapped[str] = mapped_column(String(200), index=True)
+    disposition: Mapped[str] = mapped_column(String(30), index=True)
+    treatment_count: Mapped[int] = mapped_column(Integer)
+    baseline_count: Mapped[int] = mapped_column(Integer)
+    regime_count: Mapped[int] = mapped_column(Integer)
+    effects: Mapped[dict[str, Any]] = mapped_column(JSON)
+    robustness: Mapped[dict[str, Any]] = mapped_column(JSON)
+    methodology_critic: Mapped[dict[str, Any]] = mapped_column(JSON)
+    artifact_uri: Mapped[str] = mapped_column(String(1000))
+    code_sha: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
 class MarketObservation(Base):
     __tablename__ = "market_observations"
     __table_args__ = (UniqueConstraint("asset", "observed_at", "observation_kind"),)
