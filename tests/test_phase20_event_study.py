@@ -1,6 +1,7 @@
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from sqlalchemy import create_engine
@@ -8,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from quant_research_radar.db import (
     Base,
+    ChannelHypothesis,
     CollectionRun,
     MarketObservation,
     RawArtifact,
@@ -21,12 +23,15 @@ from quant_research_radar.event_study import (
     funding_spec_from_hypothesis,
 )
 
+HYPOTHESIS_ID = UUID("00000000-0000-0000-0000-000000000001")
+FAMILY = "EXTREME_FUNDING_FORWARD_RETURN"
+
 
 def _spec() -> EventStudySpec:
     return replace(
         EventStudySpec.funding_v1(
-            hypothesis_id="hypothesis-1",
-            hypothesis_family_id="EXTREME_FUNDING_FORWARD_RETURN",
+            hypothesis_id=str(HYPOTHESIS_ID),
+            hypothesis_family_id=FAMILY,
             created_at=datetime(2026, 8, 31, tzinfo=UTC),
             sample_start=datetime(2026, 7, 1, tzinfo=UTC),
             sample_end=datetime(2026, 8, 1, tzinfo=UTC),
@@ -39,6 +44,30 @@ def _session() -> Session:
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     return Session(engine)
+
+
+def _ready_hypothesis(session: Session) -> None:
+    session.add(
+        ChannelHypothesis(
+            id=HYPOTHESIS_ID,
+            channel="MARKET",
+            statement="funding study",
+            mechanism=None,
+            condition="funding percentile >= 90",
+            outcome="forward return",
+            universe="BTC",
+            horizon="24h",
+            expected_direction=None,
+            required_data=["funding", "candles"],
+            falsification_criterion="no difference",
+            maturity="H3",
+            status="TEST_READY",
+            fingerprint=FAMILY,
+            analysis_mode="ACCELERATED_RECONSTRUCTIVE_RESEARCH",
+            availability_basis="SOURCE_NATIVE_AVAILABILITY_TIME",
+            as_of=datetime(2026, 8, 1, tzinfo=UTC),
+        )
+    )
 
 
 def _seed_hour(session: Session, at: datetime, funding: float, price: float) -> None:
@@ -166,6 +195,11 @@ def test_future_funding_and_candle_cannot_change_past_event_qualification() -> N
     assert target.outcomes[24] is None
 
 
+def test_engine_rejects_unpersisted_hypothesis_spec(tmp_path) -> None:
+    with pytest.raises(SpecIncompleteError, match="persisted TEST_READY"):
+        EventStudyEngine(_session(), _spec(), client=None).run(tmp_path)
+
+
 def test_engine_writes_reproducible_artifacts_and_never_supports_without_critic(
     tmp_path,
 ) -> None:
@@ -176,6 +210,7 @@ def test_engine_writes_reproducible_artifacts_and_never_supports_without_critic(
             session, start + timedelta(hours=hour), float(hour % 20), 100.0 + hour
         )
     _archive_replay_observations(session)
+    _ready_hypothesis(session)
     session.commit()
 
     result = EventStudyEngine(session, _spec(), client=None).run(tmp_path)

@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .db import (
+    ChannelHypothesis,
     CollectionRun,
     CollectionStatus,
     EventStudyResultRecord,
@@ -538,6 +539,7 @@ class EventStudyEngine:
         self.session, self.spec, self.client = session, spec, client
 
     def run(self, output_root: Path) -> dict[str, Any]:
+        self._require_ready_hypothesis()
         self._persist_spec()
         dataset = EventDatasetBuilder(self.session, self.spec).build()
         run_id = str(uuid.uuid4())
@@ -571,6 +573,25 @@ class EventStudyEngine:
             "coverage": coverage,
             "critic": critic,
         }
+
+    def _require_ready_hypothesis(self) -> None:
+        try:
+            hypothesis_id = uuid.UUID(self.spec.hypothesis_id)
+        except ValueError as exc:
+            raise SpecIncompleteError(
+                "SPEC_INCOMPLETE: persisted hypothesis UUID required"
+            ) from exc
+        hypothesis = self.session.get(ChannelHypothesis, hypothesis_id)
+        if (
+            hypothesis is None
+            or hypothesis.status != "TEST_READY"
+            or hypothesis.fingerprint != self.spec.hypothesis_family_id
+            or hypothesis.analysis_mode != self.spec.analysis_mode
+            or hypothesis.availability_basis != AVAILABILITY_BASIS
+        ):
+            raise SpecIncompleteError(
+                "SPEC_INCOMPLETE: exact persisted TEST_READY hypothesis is required"
+            )
 
     def _persist_spec(self) -> None:
         existing = self.session.get(EventStudySpecRecord, self.spec.spec_id)

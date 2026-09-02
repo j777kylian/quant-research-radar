@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import uuid
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import cast
@@ -271,7 +272,10 @@ def main() -> None:
             raise SystemExit(
                 "event-study run requires --start, --end, and --hypothesis-id"
             )
-        hypothesis = session.get(ChannelHypothesis, args.hypothesis_id)
+        try:
+            hypothesis = session.get(ChannelHypothesis, uuid.UUID(args.hypothesis_id))
+        except ValueError as exc:
+            raise SystemExit("event-study hypothesis-id must be a UUID") from exc
         if hypothesis is None:
             raise SystemExit("event-study hypothesis not found")
         if hypothesis.status != "TEST_READY":
