@@ -200,6 +200,16 @@ def test_engine_rejects_unpersisted_hypothesis_spec(tmp_path) -> None:
         EventStudyEngine(_session(), _spec(), client=None).run(tmp_path)
 
 
+def test_engine_rejects_forged_production_mode_spec(tmp_path) -> None:
+    session = _session()
+    _ready_hypothesis(session)
+    session.commit()
+    with pytest.raises(SpecIncompleteError, match="persisted TEST_READY"):
+        EventStudyEngine(
+            session, replace(_spec(), analysis_mode="PRODUCTION_LIVE"), client=None
+        ).run(tmp_path)
+
+
 def test_engine_writes_reproducible_artifacts_and_never_supports_without_critic(
     tmp_path,
 ) -> None:

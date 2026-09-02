@@ -583,10 +583,11 @@ class EventStudyEngine:
             ) from exc
         hypothesis = self.session.get(ChannelHypothesis, hypothesis_id)
         if (
-            hypothesis is None
+            self.spec.analysis_mode != MODE
+            or hypothesis is None
             or hypothesis.status != "TEST_READY"
             or hypothesis.fingerprint != self.spec.hypothesis_family_id
-            or hypothesis.analysis_mode != self.spec.analysis_mode
+            or hypothesis.analysis_mode != MODE
             or hypothesis.availability_basis != AVAILABILITY_BASIS
         ):
             raise SpecIncompleteError(
