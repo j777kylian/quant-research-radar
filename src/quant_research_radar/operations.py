@@ -76,17 +76,14 @@ class OperationsLock:
     backfill so they cannot write conflicting state concurrently.
     """
 
-    STALE_SECONDS = 30 * 60
-
     def __init__(self, root: Path) -> None:
         self.dir = root / ".operations.lock"
         self.owner = self.dir / "owner"
 
     def acquire(self) -> bool:
-        self.dir.mkdir(parents=True, exist_ok=True)
         for _ in range(2):
             try:
-                self.dir.mkdir(exist_ok=False)
+                self.dir.mkdir(parents=True, exist_ok=False)
                 self.owner.write_text(f"{os.getpid()} {utcnow().isoformat()}")
                 return True
             except FileExistsError:
