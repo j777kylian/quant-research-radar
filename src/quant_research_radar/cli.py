@@ -229,7 +229,12 @@ def main() -> None:
         )
         from .raw_archive import RawArchive
 
-        end = normalize_utc(args.end) if args.end else safe_complete_hour()
+        safe_end = safe_complete_hour()
+        end = normalize_utc(args.end) if args.end else safe_end
+        if end > safe_end:
+            raise SystemExit(
+                "BLOCKED: --end must not exceed the latest completed UTC hour"
+            )
         start = (
             normalize_utc(args.start)
             if args.start
