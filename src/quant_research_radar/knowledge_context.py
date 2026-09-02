@@ -9,7 +9,7 @@ from enum import StrEnum
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .db import ChannelHypothesis, normalize_utc
+from .db import ChannelHypothesis, EventStudyResultRecord, normalize_utc
 
 
 class Novelty(StrEnum):
@@ -27,6 +27,7 @@ class PriorResearchContext:
     """Prior records only: never a source-evidence or support-count input."""
 
     related: tuple[ChannelHypothesis, ...]
+    empirical_results: tuple[EventStudyResultRecord, ...]
     novelty: Novelty
     occurrence_count: int
 
@@ -54,9 +55,21 @@ def prior_research_context(
             .order_by(ChannelHypothesis.as_of, ChannelHypothesis.created_at)
         ).all()
     )
-    if not rows:
-        return PriorResearchContext(rows, Novelty.NEW, 0)
-    if any(row.maturity == "REJECTED" for row in rows):
+    empirical_results = tuple(
+        session.scalars(
+            select(EventStudyResultRecord)
+            .where(
+                EventStudyResultRecord.hypothesis_family_id == fingerprint,
+                EventStudyResultRecord.created_at < normalize_utc(as_of),
+            )
+            .order_by(EventStudyResultRecord.created_at)
+        ).all()
+    )
+    if not rows and not empirical_results:
+        return PriorResearchContext(rows, empirical_results, Novelty.NEW, 0)
+    if any(result.disposition == "REJECTED" for result in empirical_results) or any(
+        row.maturity == "REJECTED" for row in rows
+    ):
         novelty = Novelty.PREVIOUSLY_REJECTED
     elif any(row.universe == universe for row in rows):
         novelty = (
@@ -64,4 +77,4 @@ def prior_research_context(
         )
     else:
         novelty = Novelty.ASSET_VARIANT
-    return PriorResearchContext(rows, novelty, len(rows))
+    return PriorResearchContext(rows, empirical_results, novelty, len(rows))

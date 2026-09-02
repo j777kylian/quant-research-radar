@@ -5,7 +5,13 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from quant_research_radar.db import Base, MarketObservation
+from quant_research_radar.db import (
+    Base,
+    CollectionRun,
+    MarketObservation,
+    RawArtifact,
+    RawArtifactReceipt,
+)
 from quant_research_radar.event_study import (
     EventDatasetBuilder,
     EventStudyEngine,
@@ -57,6 +63,31 @@ def _seed_hour(session: Session, at: datetime, funding: float, price: float) -> 
     )
 
 
+def _archive_replay_observations(session: Session) -> None:
+    artifact = RawArtifact(
+        content_sha256="a" * 64,
+        media_type="application/json",
+        byte_size=2,
+        storage_uri="data/raw/objects/aa/" + "a" * 64,
+    )
+    run = CollectionRun(source="test", status="SUCCESS")
+    session.add_all([artifact, run])
+    session.flush()
+    for observation in session.query(MarketObservation).all():
+        session.add(
+            RawArtifactReceipt(
+                raw_artifact_id=artifact.id,
+                provider="hyperliquid",
+                canonical_url=None,
+                source_native_timestamp=observation.observed_at,
+                retrieved_at=observation.retrieved_at,
+                market_observation_id=observation.id,
+                collection_run_id=run.id,
+                analysis_mode="ACCELERATED_RECONSTRUCTIVE_RESEARCH",
+            )
+        )
+
+
 def test_incomplete_hypothesis_cannot_become_executable_spec() -> None:
     with pytest.raises(SpecIncompleteError, match="SPEC_INCOMPLETE"):
         funding_spec_from_hypothesis(
@@ -91,6 +122,7 @@ def test_future_funding_and_candle_cannot_change_past_event_qualification() -> N
     start = datetime(2026, 7, 1, tzinfo=UTC)
     for hour in range(31):
         _seed_hour(session, start + timedelta(hours=hour), float(hour), 100.0 + hour)
+    _archive_replay_observations(session)
     session.commit()
 
     before = EventDatasetBuilder(session, _spec()).build()
@@ -117,6 +149,7 @@ def test_engine_writes_reproducible_artifacts_and_never_supports_without_critic(
         _seed_hour(
             session, start + timedelta(hours=hour), float(hour % 20), 100.0 + hour
         )
+    _archive_replay_observations(session)
     session.commit()
 
     result = EventStudyEngine(session, _spec(), client=None).run(tmp_path)

@@ -349,16 +349,17 @@ class EventDatasetBuilder:
             )
             .order_by(MarketObservation.observed_at)
         ).all()
-        receipt_rows = self.session.execute(
-            select(
-                RawArtifactReceipt.market_observation_id, RawArtifactReceipt.id
-            ).where(
+        receipt_rows = self.session.scalars(
+            select(RawArtifactReceipt).where(
+                RawArtifactReceipt.analysis_mode == MODE,
                 RawArtifactReceipt.collection_run_id.is_not(None),
+                RawArtifactReceipt.market_observation_id.is_not(None),
             )
         ).all()
         receipt_map: dict[object, list[str]] = defaultdict(list)
-        for observation_id, receipt_id in receipt_rows:
-            receipt_map[observation_id].append(str(receipt_id))
+        for receipt in receipt_rows:
+            if receipt.source_native_timestamp is not None:
+                receipt_map[receipt.market_observation_id].append(str(receipt.id))
         funding = [
             (
                 normalize_utc(row.observed_at),
@@ -367,7 +368,9 @@ class EventDatasetBuilder:
                 tuple(sorted(receipt_map[row.id])),
             )
             for row in observations
-            if row.observation_kind == "funding" and row.funding_rate is not None
+            if row.observation_kind == "funding"
+            and row.funding_rate is not None
+            and receipt_map[row.id]
         ]
         candles = [
             (normalize_utc(row.observed_at), float(row.mark_price), str(row.id))
@@ -513,7 +516,7 @@ class EventStudyEngine:
         coverage = self._coverage(dataset)
         analyses = self._analyses(dataset)
         controls = self._controls(dataset)
-        status = self._disposition(analyses, controls)
+        status = self._disposition(analyses, controls, coverage)
         critic = self._critic_packet(dataset, analyses, controls, coverage)
         if (
             status
@@ -566,6 +569,26 @@ class EventStudyEngine:
         result: dict[str, Any] = {}
         for asset in self.spec.assets:
             asset_rows = [row for row in dataset if row.asset == asset]
+            source_rows = self.session.scalars(
+                select(MarketObservation).where(
+                    MarketObservation.asset == asset,
+                    MarketObservation.observed_at >= self.spec.sample_start,
+                    MarketObservation.observed_at <= self.spec.sample_end,
+                )
+            ).all()
+            candle_times = sorted(
+                normalize_utc(row.observed_at)
+                for row in source_rows
+                if row.observation_kind == "candle"
+            )
+            expected_candles = (
+                int(
+                    (self.spec.sample_end - self.spec.sample_start).total_seconds()
+                    // 3600
+                )
+                + 1
+            )
+            missing_candles = max(0, expected_candles - len(set(candle_times)))
             events = [row for row in asset_rows if row.treatment]
             result[asset] = {
                 "funding_start": min(
@@ -574,6 +597,11 @@ class EventStudyEngine:
                 "funding_end": max(
                     (row.event_time for row in asset_rows), default=None
                 ),
+                "candle_start": min(candle_times, default=None),
+                "candle_end": max(candle_times, default=None),
+                "missing_candle_intervals": missing_candles,
+                "duplicate_candle_observations": len(candle_times)
+                - len(set(candle_times)),
                 "eligible_event_count": len(events),
                 "eligible_baseline_count": sum(not row.treatment for row in asset_rows),
                 "independent_regime_count": len(_regime_rows(events)),
@@ -679,6 +707,42 @@ class EventStudyEngine:
             result["warnings"].append("POSSIBLE_PSEUDO_REPLICATION")
         return result
 
+    def _matched_baseline(self, dataset: tuple[EventRow, ...]) -> dict[str, Any]:
+        ordinary_by_group: dict[str, list[EventRow]] = defaultdict(list)
+        for row in dataset:
+            if not row.treatment and row.outcomes[24] is not None:
+                ordinary_by_group[row.baseline_group].append(row)
+        used: set[str] = set()
+        pairs: list[tuple[EventRow, EventRow]] = []
+        unmatched: list[str] = []
+        for treated in (
+            row for row in dataset if row.treatment and row.outcomes[24] is not None
+        ):
+            candidate = next(
+                (
+                    row
+                    for row in ordinary_by_group[treated.baseline_group]
+                    if row.event_id not in used
+                ),
+                None,
+            )
+            if candidate is None:
+                unmatched.append(treated.event_id)
+            else:
+                used.add(candidate.event_id)
+                pairs.append((treated, candidate))
+        differences = [
+            _outcome(left, 24) - _outcome(right, 24) for left, right in pairs
+        ]
+        return {
+            "policy": "same-asset, pre-event-return-direction, pre-event-volatility-availability strata; no future fields",
+            "matched_count": len(pairs),
+            "unmatched_event_ids": unmatched,
+            "mean_difference_24h": statistics.fmean(differences)
+            if differences
+            else None,
+        }
+
     def _controls(self, dataset: tuple[EventRow, ...]) -> dict[str, Any]:
         base = [row for row in dataset if row.outcomes[24] is not None]
         treated = [row for row in base if row.treatment]
@@ -689,6 +753,7 @@ class EventStudyEngine:
                 "shuffled_treatment": "DATA_INSUFFICIENT",
                 "future_leakage_probe": "PASS",
                 "placebo": "DATA_INSUFFICIENT",
+                "matched_baseline": self._matched_baseline(dataset),
             }
         rng = random.Random(self.spec.random_seed)
         sampled = rng.sample(ordinary, min(len(treated), len(ordinary)))
@@ -731,11 +796,21 @@ class EventStudyEngine:
                 "condition": "45 <= funding percentile < 55",
                 "effect": placebo_effect,
             },
+            "matched_baseline": self._matched_baseline(dataset),
         }
 
     def _disposition(
-        self, analyses: Mapping[str, Any], controls: Mapping[str, Any]
+        self,
+        analyses: Mapping[str, Any],
+        controls: Mapping[str, Any],
+        coverage: Mapping[str, Any],
     ) -> EventStudyDisposition:
+        if any(
+            coverage[asset]["eligible_event_count"]
+            and not coverage[asset]["receipt_covered_event_count"]
+            for asset in self.spec.assets
+        ):
+            return EventStudyDisposition.DATA_INSUFFICIENT
         primary = analyses["regime"].get("POOLED:24h", {})
         count = primary.get("treatment", {}).get("n", 0)
         regimes = primary.get("treatment", {}).get("n", 0)
@@ -795,10 +870,13 @@ class EventStudyEngine:
         try:
             output = self.client.critique(_canonical(packet))
             output = type(output).model_validate(output.model_dump())
+            disposition = (
+                "ACCEPT"
+                if output.provenance_sufficient and not output.failure_reasons
+                else "REJECT"
+            )
             return {
-                "disposition": "ACCEPT"
-                if output.provenance_sufficient
-                else "REQUEST_DATA",
+                "disposition": disposition,
                 "review": output.model_dump(),
                 "packet": packet,
             }
