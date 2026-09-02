@@ -172,6 +172,14 @@ def main() -> None:
     knowledge.add_argument("--channel")
     knowledge.add_argument("--maturity")
     knowledge.add_argument("--as-of", type=datetime.fromisoformat)
+    operations = sub.add_parser("phase20-market-collect")
+    operations.add_argument("mode", choices=["historical", "live", "audit"])
+    operations.add_argument("--database-url", required=True)
+    operations.add_argument("--start", type=datetime.fromisoformat)
+    operations.add_argument("--end", type=datetime.fromisoformat)
+    operations.add_argument("--archive-root", default="data/raw")
+    operations.add_argument("--audit-output")
+    operations.add_argument("--code-sha", required=True)
     event_study = sub.add_parser("event-study")
     event_study.add_argument("action", choices=["run", "list", "show"])
     event_study.add_argument("--database-url", required=True)
@@ -211,6 +219,69 @@ def main() -> None:
     )
     args = parser.parse_args()
     settings = get_settings()
+    if args.command == "phase20-market-collect":
+        from .market_operations import (
+            coverage_audit,
+            default_backfill_start,
+            run_historical_backfill,
+            run_live_market_collection,
+            safe_complete_hour,
+        )
+        from .raw_archive import RawArchive
+
+        end = normalize_utc(args.end) if args.end else safe_complete_hour()
+        start = (
+            normalize_utc(args.start)
+            if args.start
+            else (
+                default_backfill_start(end)
+                if args.mode == "historical"
+                else end - timedelta(hours=2)
+            )
+        )
+        migrate_database(args.database_url)
+        session = make_session_factory(make_engine(args.database_url))()
+        if args.mode == "audit":
+            print(
+                json.dumps(
+                    coverage_audit(session, start=start, end=end), sort_keys=True
+                )
+            )
+            return
+        runner = (
+            run_historical_backfill
+            if args.mode == "historical"
+            else run_live_market_collection
+        )
+        collection_result = runner(
+            session,
+            HyperliquidSource(),
+            RawArchive(Path(args.archive_root)),
+            start=start,
+            end=end,
+            code_sha=args.code_sha,
+        )
+        collection_result["coverage_audit"] = coverage_audit(
+            session,
+            start=start,
+            end=end,
+            mode=(
+                "ACCELERATED_RECONSTRUCTIVE_RESEARCH"
+                if args.mode == "historical"
+                else "PRODUCTION_LIVE"
+            ),
+        )
+        if args.audit_output:
+            output = Path(args.audit_output)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(
+                    collection_result["coverage_audit"], indent=2, sort_keys=True
+                ),
+                encoding="utf-8",
+            )
+        print(json.dumps(collection_result, sort_keys=True))
+        return
     if args.command == "event-study":
         from .db import ChannelHypothesis, EventStudyResultRecord
         from .event_study import EventStudyEngine, funding_spec_from_hypothesis

@@ -18,6 +18,7 @@ from .db import (
     Hypothesis,
     MarketMetric,
     MarketObservation,
+    RawArtifactReceipt,
     SourceItem,
     content_hash,
     normalize_utc,
@@ -303,6 +304,7 @@ def ingest_records(
     records: list[SourceRecord],
     archive: RawArchive | None = None,
     collection_run_id: object | None = None,
+    analysis_mode: str = "PRODUCTION_LIVE",
 ) -> tuple[int, int]:
     market_records = [record for record in records if record.source_type == "MARKET"]
     auto_run: CollectionRun | None = None
@@ -329,6 +331,31 @@ def ingest_records(
         )
         if existing:
             duplicates += 1
+            if record.source_type == "MARKET" and archive is not None:
+                observation = _persist_market(session, record)
+                receipt_exists = observation is not None and session.scalar(
+                    select(RawArtifactReceipt.id).where(
+                        RawArtifactReceipt.market_observation_id == observation.id,
+                        RawArtifactReceipt.collection_run_id == collection_run_id,
+                        RawArtifactReceipt.analysis_mode == analysis_mode,
+                    )
+                )
+                if observation is not None and receipt_exists is None:
+                    archive_receipt(
+                        session,
+                        archive,
+                        content=json.dumps(
+                            record.raw_metadata, sort_keys=True
+                        ).encode(),
+                        media_type="application/json",
+                        provider=record.source_name,
+                        canonical_url=None,
+                        retrieved_at=normalize_utc(observation.retrieved_at),
+                        source_native_timestamp=record.published_at,
+                        market_observation_id=observation.id,
+                        collection_run_id=collection_run_id,
+                        analysis_mode=analysis_mode,
+                    )
             continue
         session.add(
             SourceItem(
@@ -359,6 +386,7 @@ def ingest_records(
                     source_native_timestamp=record.published_at,
                     market_observation_id=observation.id,
                     collection_run_id=collection_run_id,
+                    analysis_mode=analysis_mode,
                 )
         inserted += 1
     if auto_run is not None:
