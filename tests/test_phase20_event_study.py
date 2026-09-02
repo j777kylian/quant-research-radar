@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine
@@ -167,7 +168,11 @@ def test_engine_writes_reproducible_artifacts_and_never_supports_without_critic(
     assert result["status"] != "SUPPORTED"
     assert result["critic"]["disposition"] == "NOT_RUN"
     artifact = tmp_path / result["run_id"]
-    assert {
+    manifest = (artifact / "dataset_manifest.json").read_text(encoding="utf-8")
+    assert '"source_receipt_ids"' in manifest
+    repeat = EventStudyEngine(session, _spec(), client=None).run(tmp_path / "repeat")
+    repeat_artifact = Path(tmp_path / "repeat" / repeat["run_id"])
+    for name in (
         "spec.json",
         "dataset_manifest.json",
         "summary.json",
@@ -176,4 +181,5 @@ def test_engine_writes_reproducible_artifacts_and_never_supports_without_critic(
         "negative_controls.json",
         "critic.json",
         "executive.md",
-    } <= {path.name for path in artifact.iterdir()}
+    ):
+        assert (artifact / name).read_bytes() == (repeat_artifact / name).read_bytes()
