@@ -7,7 +7,7 @@ command -v uv >/dev/null || { echo "BLOCKED: uv is required" >&2; exit 2; }
 DB="${PHASE20_DATABASE_URL:-sqlite:///$ROOT/data/phase20-market.db}"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 LOG_DIR="outputs/phase20-collection/logs"
-LOCK_DIR="outputs/phase20-collection/.historical.lock"
+LOCK_DIR="outputs/phase20-collection/.market.lock"
 mkdir -p "$LOG_DIR"
 mkdir "$LOCK_DIR" 2>/dev/null || { echo "BLOCKED: historical collector already running: $LOCK_DIR" >&2; exit 3; }
 trap 'rmdir "$LOCK_DIR"' EXIT INT TERM

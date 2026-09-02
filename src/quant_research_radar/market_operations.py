@@ -192,9 +192,12 @@ def coverage_audit(
     receipt_counts: dict[tuple[str, str, datetime], int] = defaultdict(int)
     for receipt, _run, observation in receipts:
         at = normalize_utc(observation.observed_at)
-        if (
-            receipt.source_native_timestamp is not None
-            and normalize_utc(receipt.source_native_timestamp) == at
+        if receipt.source_native_timestamp is not None and normalize_utc(
+            receipt.source_native_timestamp
+        ) == at + (
+            timedelta(hours=1)
+            if observation.observation_kind == "candle"
+            else timedelta()
         ):
             qualified[observation.asset][observation.observation_kind][at] = observation
             receipt_counts[(observation.asset, observation.observation_kind, at)] += 1

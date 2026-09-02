@@ -369,6 +369,7 @@ class EventDatasetBuilder:
             )
         ).all()
         receipt_map: dict[object, list[str]] = defaultdict(list)
+        observations_by_id = {row.id: row for row in observations}
         observation_times = {
             row.id: normalize_utc(row.observed_at) for row in observations
         }
@@ -377,7 +378,16 @@ class EventDatasetBuilder:
             if (
                 observation_time is not None
                 and receipt.source_native_timestamp is not None
-                and normalize_utc(receipt.source_native_timestamp) == observation_time
+                and normalize_utc(receipt.source_native_timestamp)
+                == observation_time
+                + (
+                    timedelta(hours=1)
+                    if observations_by_id[
+                        receipt.market_observation_id
+                    ].observation_kind
+                    == "candle"
+                    else timedelta()
+                )
             ):
                 receipt_map[receipt.market_observation_id].append(str(receipt.id))
         funding = [

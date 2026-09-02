@@ -299,6 +299,15 @@ def ingest(
             session.commit()
 
 
+def _market_source_native_timestamp(record: SourceRecord) -> datetime | None:
+    if record.raw_metadata.get("kind") != "candle":
+        return record.published_at
+    value = record.raw_metadata.get("candle_close_timestamp")
+    if not isinstance(value, str):
+        raise ValueError("market candle record lacks close timestamp")
+    return normalize_utc(datetime.fromisoformat(value))
+
+
 def ingest_records(
     session: Session,
     records: list[SourceRecord],
@@ -351,7 +360,7 @@ def ingest_records(
                         provider=record.source_name,
                         canonical_url=None,
                         retrieved_at=normalize_utc(observation.retrieved_at),
-                        source_native_timestamp=record.published_at,
+                        source_native_timestamp=_market_source_native_timestamp(record),
                         market_observation_id=observation.id,
                         collection_run_id=collection_run_id,
                         analysis_mode=analysis_mode,
@@ -383,7 +392,7 @@ def ingest_records(
                     provider=record.source_name,
                     canonical_url=None,
                     retrieved_at=normalize_utc(observation.retrieved_at),
-                    source_native_timestamp=record.published_at,
+                    source_native_timestamp=_market_source_native_timestamp(record),
                     market_observation_id=observation.id,
                     collection_run_id=collection_run_id,
                     analysis_mode=analysis_mode,

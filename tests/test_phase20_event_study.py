@@ -113,7 +113,13 @@ def _archive_replay_observations(
                 raw_artifact_id=artifact.id,
                 provider="hyperliquid",
                 canonical_url=None,
-                source_native_timestamp=observation.observed_at + source_time_offset,
+                source_native_timestamp=observation.observed_at
+                + (
+                    timedelta(hours=1)
+                    if observation.observation_kind == "candle"
+                    else timedelta()
+                )
+                + source_time_offset,
                 retrieved_at=observation.retrieved_at,
                 market_observation_id=observation.id,
                 collection_run_id=run.id,
