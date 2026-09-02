@@ -160,6 +160,7 @@ def coverage_audit(
     qualified: dict[str, dict[str, dict[datetime, MarketObservation]]] = defaultdict(
         lambda: defaultdict(dict)
     )
+    receipt_counts: dict[tuple[str, str, datetime], int] = defaultdict(int)
     for receipt, _run, observation in receipts:
         at = normalize_utc(observation.observed_at)
         if (
@@ -167,6 +168,7 @@ def coverage_audit(
             and normalize_utc(receipt.source_native_timestamp) == at
         ):
             qualified[observation.asset][observation.observation_kind][at] = observation
+            receipt_counts[(observation.asset, observation.observation_kind, at)] += 1
     assets: dict[str, Any] = {}
     for asset in ASSETS:
         funding = qualified[asset]["funding"]
@@ -204,7 +206,9 @@ def coverage_audit(
             for horizon in (1, 4, 24)
         }
 
-        def summary(rows: dict[datetime, MarketObservation]) -> dict[str, Any]:
+        def summary(
+            asset_name: str, kind: str, rows: dict[datetime, MarketObservation]
+        ) -> dict[str, Any]:
             points = sorted(rows)
             gaps = sum(
                 b - a > timedelta(hours=1)
@@ -216,12 +220,14 @@ def coverage_audit(
                 "row_count": len(points),
                 "receipt_qualified_row_count": len(points),
                 "gaps": gaps,
-                "duplicate_count": 0,
+                "duplicate_count": sum(
+                    max(0, receipt_counts[(asset_name, kind, at)] - 1) for at in points
+                ),
             }
 
         assets[asset] = {
-            "funding": summary(funding),
-            "candle": summary(candles),
+            "funding": summary(asset, "funding", funding),
+            "candle": summary(asset, "candle", candles),
             "extreme_funding_observation_count": len(extreme),
             "independent_extreme_funding_regime_count": regimes,
             "eligible_outcomes": {str(key): value for key, value in outcomes.items()},
