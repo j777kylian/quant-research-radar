@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import (
     JSON,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -511,6 +512,49 @@ class AnalysisRun(Base):
         DateTime(timezone=True), default=utcnow
     )
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DailyRun(Base):
+    """One canonical Daily operations cycle, keyed by logical Beijing date."""
+
+    __tablename__ = "daily_runs"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    logical_date: Mapped[date] = mapped_column(Date, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="RUNNING")
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    code_sha: Mapped[str] = mapped_column(String(64))
+    market_status: Mapped[str] = mapped_column(String(20), default="PENDING")
+    academic_status: Mapped[str] = mapped_column(String(20), default="PENDING")
+    practitioner_status: Mapped[str] = mapped_column(String(20), default="PENDING")
+    analysis_status: Mapped[str] = mapped_column(String(20), default="PENDING")
+    knowledge_status: Mapped[str] = mapped_column(String(20), default="PENDING")
+    audit_status: Mapped[str] = mapped_column(String(20), default="PENDING")
+    report_path: Mapped[str | None] = mapped_column(String(1000))
+    failure_reasons: Mapped[list[str]] = mapped_column(JSON, default=list)
+    source_health: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    llm_summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class WeeklyRun(Base):
+    """One canonical Weekly review, keyed by week-ending Saturday."""
+
+    __tablename__ = "weekly_runs"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    week_saturday: Mapped[date] = mapped_column(Date, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="RUNNING")
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    code_sha: Mapped[str] = mapped_column(String(64))
+    included_daily_dates: Mapped[list[str]] = mapped_column(JSON, default=list)
+    report_path: Mapped[str | None] = mapped_column(String(1000))
+    failure_reasons: Mapped[list[str]] = mapped_column(JSON, default=list)
+    priorities: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    low_frequency_fit: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
 def content_hash(text: str, metadata: dict[str, Any] | None = None) -> str:

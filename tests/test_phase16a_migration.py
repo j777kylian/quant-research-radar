@@ -73,7 +73,7 @@ def test_fresh_database_reaches_head(tmp_path):
     with engine.connect() as connection:
         assert (
             connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
-            == "0010_phase20_event_study"
+            == "0011_operations_runs"
         )
     assert "requested_start" in {
         column["name"] for column in inspect(engine).get_columns("collection_runs")
@@ -105,5 +105,5 @@ def test_phase16d_migration_adds_research_intelligence_tables(tmp_path):
     with engine.connect() as connection:
         assert (
             connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
-            == "0010_phase20_event_study"
+            == "0011_operations_runs"
         )

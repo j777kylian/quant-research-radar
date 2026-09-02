@@ -21,7 +21,13 @@ from .db import (
     make_session_factory,
     normalize_utc,
 )
-from .llm import DeepSeekClient, FakeLLMClient, LLMClient, ModelRouter
+from .llm import (
+    DeepSeekClient,
+    FakeLLMClient,
+    LLMClient,
+    ModelRouter,
+    build_deepseek_client,
+)
 from .pipeline import (
     calculate_metrics,
     daily_report,
@@ -85,12 +91,18 @@ def _alembic_config(database_url: str) -> Config:
 
 
 def _phase18_client(settings: Settings) -> DeepSeekClient | None:
-    """Configured provider only; absence leaves Critic/Tutor honestly NOT_RUN."""
-    if settings.llm_provider != "deepseek" or not settings.deepseek_api_key:
+    """DeepSeek client when a credential is present; absence leaves Critic/Tutor NOT_RUN.
+
+    The provider flag (``llm_provider``) is a legacy safe default and must not
+    disable the real DeepSeek credential when one is configured: role routing is
+    already pinned to the DeepSeek flash/pro models in the environment.
+    """
+    if not settings.deepseek_api_key:
         return None
-    return DeepSeekClient(
+    return build_deepseek_client(
         settings.deepseek_api_key,
-        ModelRouter(settings.llm_flash_model, settings.llm_pro_model),
+        settings.llm_flash_model,
+        settings.llm_pro_model,
         settings.deepseek_base_url,
         settings.llm_timeout_seconds,
         settings.http_retries,
@@ -180,6 +192,14 @@ def main() -> None:
     operations.add_argument("--archive-root", default="data/raw")
     operations.add_argument("--audit-output")
     operations.add_argument("--code-sha", default="")
+    ops = sub.add_parser("ops")
+    ops.add_argument("action", choices=["daily", "weekly", "status", "tick"])
+    ops.add_argument("--database-url", default=None)
+    ops.add_argument("--output-root", default="outputs/operations")
+    ops.add_argument("--archive-root", default="data/raw")
+    ops.add_argument("--code-sha", default="")
+    ops.add_argument("--force", action="store_true")
+    ops.add_argument("--now", type=datetime.fromisoformat, default=None)
     event_study = sub.add_parser("event-study")
     event_study.add_argument("action", choices=["run", "list", "show"])
     event_study.add_argument("--database-url", required=True)
@@ -219,6 +239,74 @@ def main() -> None:
     )
     args = parser.parse_args()
     settings = get_settings()
+    if args.command == "ops":
+        from .operations import (
+            OperationsLock,
+            build_client,
+            ops_status,
+            run_daily,
+            run_weekly,
+        )
+        from .scheduler import beijing_date, most_recent_saturday
+
+        database_url = args.database_url or settings.database_url
+        migrate_database(database_url)
+        session = make_session_factory(make_engine(database_url))()
+        if args.action == "status":
+            print(
+                json.dumps(
+                    ops_status(session, now=args.now), default=str, sort_keys=True
+                )
+            )
+            return
+        if args.action == "tick":
+            from .operations import scheduler_tick
+
+            print(
+                json.dumps(
+                    scheduler_tick(
+                        session,
+                        settings=settings,
+                        output_root=Path(args.output_root),
+                        archive_root=Path(args.archive_root),
+                        code_sha=args.code_sha,
+                        now=args.now,
+                    ),
+                    default=str,
+                    sort_keys=True,
+                )
+            )
+            return
+        root = Path(args.output_root)
+        root.mkdir(parents=True, exist_ok=True)
+        lock = OperationsLock(root)
+        if not args.force and not lock.acquire():
+            print(json.dumps({"status": "LOCKED"}))
+            return
+        try:
+            ops_client = build_client(settings)
+            if args.action == "daily":
+                ops_result = run_daily(
+                    session,
+                    logical_date=beijing_date(args.now),
+                    code_sha=args.code_sha,
+                    output_root=root / "daily",
+                    client=ops_client,
+                    archive_root=Path(args.archive_root),
+                    settings=settings,
+                )
+            else:
+                ops_result = run_weekly(
+                    session,
+                    week_saturday=most_recent_saturday(beijing_date(args.now)),
+                    code_sha=args.code_sha,
+                    output_root=root / "weekly",
+                    client=ops_client,
+                )
+            print(json.dumps(ops_result, default=str, sort_keys=True))
+        finally:
+            lock.release()
+        return
     if args.command == "phase20-market-collect":
         from .market_operations import (
             coverage_audit,

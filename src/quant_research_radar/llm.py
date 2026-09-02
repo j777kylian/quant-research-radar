@@ -261,6 +261,24 @@ class DeepSeekClient:
 OpenAICompatClient = DeepSeekClient
 
 
+def build_deepseek_client(
+    api_key: str,
+    flash_model: str,
+    pro_model: str,
+    base_url: str = "https://api.deepseek.com",
+    timeout: float = 30.0,
+    retries: int = 2,
+) -> DeepSeekClient:
+    """Construct the production DeepSeek client with role-aware model routing."""
+    return DeepSeekClient(
+        api_key,
+        ModelRouter(flash_model, pro_model),
+        base_url,
+        timeout,
+        retries,
+    )
+
+
 class FakeLLMClient:
     provider = "fake"
     model = "fake-v1"

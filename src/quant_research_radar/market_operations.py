@@ -319,9 +319,9 @@ def run_live_market_collection(
     code_sha: str,
 ) -> dict[str, Any]:
     end = normalize_utc(end)
-    if end > safe_complete_hour() or normalize_utc(start) < end - timedelta(hours=3):
+    if end > safe_complete_hour():
         raise ValueError(
-            "live collection is limited to the latest completed hourly interval"
+            "live collection may not extend past the latest completed UTC hour"
         )
     return _run(
         session,
@@ -332,3 +332,26 @@ def run_live_market_collection(
         code_sha=code_sha,
         mode=PRODUCTION_MODE,
     )
+
+
+def latest_production_candle(session: Session) -> datetime | None:
+    """Conservative production watermark: min over assets of the latest candle.
+
+    A Daily run collects from this watermark forward (with a one-hour overlap for
+    dedup safety), so hourly resolution is preserved while the collector runs only
+    once per day. Returns ``None`` when no production candle exists yet.
+    """
+    from sqlalchemy import func
+
+    rows = session.execute(
+        select(func.max(MarketObservation.observed_at))
+        .where(
+            MarketObservation.observation_kind == "candle",
+            MarketObservation.asset.in_(ASSETS),
+        )
+        .group_by(MarketObservation.asset)
+    ).scalars()
+    present = [normalize_utc(value) for value in rows if value is not None]
+    if len(present) < len(ASSETS):
+        return None
+    return min(present)
