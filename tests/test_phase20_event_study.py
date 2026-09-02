@@ -64,14 +64,18 @@ def _seed_hour(session: Session, at: datetime, funding: float, price: float) -> 
     )
 
 
-def _archive_replay_observations(session: Session) -> None:
+def _archive_replay_observations(
+    session: Session, *, source_time_offset: timedelta = timedelta()
+) -> None:
     artifact = RawArtifact(
         content_sha256="a" * 64,
         media_type="application/json",
         byte_size=2,
         storage_uri="data/raw/objects/aa/" + "a" * 64,
     )
-    run = CollectionRun(source="test", status="SUCCESS")
+    run = CollectionRun(
+        source="test", status="SUCCESS", ended_at=datetime(2026, 8, 1, tzinfo=UTC)
+    )
     session.add_all([artifact, run])
     session.flush()
     for observation in session.query(MarketObservation).all():
@@ -80,7 +84,7 @@ def _archive_replay_observations(session: Session) -> None:
                 raw_artifact_id=artifact.id,
                 provider="hyperliquid",
                 canonical_url=None,
-                source_native_timestamp=observation.observed_at,
+                source_native_timestamp=observation.observed_at + source_time_offset,
                 retrieved_at=observation.retrieved_at,
                 market_observation_id=observation.id,
                 collection_run_id=run.id,
@@ -123,6 +127,17 @@ def test_unarchived_observations_are_not_event_or_outcome_inputs() -> None:
     start = datetime(2026, 7, 1, tzinfo=UTC)
     for hour in range(32):
         _seed_hour(session, start + timedelta(hours=hour), float(hour), 100.0 + hour)
+    session.commit()
+
+    assert EventDatasetBuilder(session, _spec()).build() == ()
+
+
+def test_future_source_native_receipts_are_not_replay_inputs() -> None:
+    session = _session()
+    start = datetime(2026, 7, 1, tzinfo=UTC)
+    for hour in range(32):
+        _seed_hour(session, start + timedelta(hours=hour), float(hour), 100.0 + hour)
+    _archive_replay_observations(session, source_time_offset=timedelta(days=90))
     session.commit()
 
     assert EventDatasetBuilder(session, _spec()).build() == ()

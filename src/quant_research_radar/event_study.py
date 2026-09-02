@@ -21,6 +21,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .db import (
+    CollectionRun,
+    CollectionStatus,
     EventStudyResultRecord,
     EventStudyRun,
     EventStudySpecRecord,
@@ -353,16 +355,29 @@ class EventDatasetBuilder:
             )
             .order_by(MarketObservation.observed_at)
         ).all()
-        receipt_rows = self.session.scalars(
-            select(RawArtifactReceipt).where(
+        receipt_rows = self.session.execute(
+            select(RawArtifactReceipt, CollectionRun)
+            .join(
+                CollectionRun, RawArtifactReceipt.collection_run_id == CollectionRun.id
+            )
+            .where(
                 RawArtifactReceipt.analysis_mode == MODE,
-                RawArtifactReceipt.collection_run_id.is_not(None),
                 RawArtifactReceipt.market_observation_id.is_not(None),
+                CollectionRun.status == CollectionStatus.SUCCESS.value,
+                CollectionRun.ended_at.is_not(None),
             )
         ).all()
         receipt_map: dict[object, list[str]] = defaultdict(list)
-        for receipt in receipt_rows:
-            if receipt.source_native_timestamp is not None:
+        observation_times = {
+            row.id: normalize_utc(row.observed_at) for row in observations
+        }
+        for receipt, _run in receipt_rows:
+            observation_time = observation_times.get(receipt.market_observation_id)
+            if (
+                observation_time is not None
+                and receipt.source_native_timestamp is not None
+                and normalize_utc(receipt.source_native_timestamp) == observation_time
+            ):
                 receipt_map[receipt.market_observation_id].append(str(receipt.id))
         funding = [
             (
@@ -832,9 +847,11 @@ class EventStudyEngine:
             for asset in self.spec.assets
         ):
             return EventStudyDisposition.DATA_INSUFFICIENT
-        primary = analyses["regime"].get("POOLED:24h", {})
+        primary = analyses["observation"].get("POOLED:24h", {})
+        regimes = (
+            analyses["regime"].get("POOLED:24h", {}).get("treatment", {}).get("n", 0)
+        )
         count = primary.get("treatment", {}).get("n", 0)
-        regimes = primary.get("treatment", {}).get("n", 0)
         if (
             count < self.spec.minimum_observations
             or regimes < self.spec.minimum_regimes

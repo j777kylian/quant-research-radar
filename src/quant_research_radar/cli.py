@@ -177,6 +177,7 @@ def main() -> None:
     event_study.add_argument("--output-dir", default="outputs/event-study")
     event_study.add_argument("--start", type=datetime.fromisoformat)
     event_study.add_argument("--end", type=datetime.fromisoformat)
+    event_study.add_argument("--hypothesis-id")
     event_study.add_argument("--run-id")
     event_study.add_argument(
         "--provider", choices=["fake", "configured"], default="configured"
@@ -210,8 +211,8 @@ def main() -> None:
     args = parser.parse_args()
     settings = get_settings()
     if args.command == "event-study":
-        from .db import EventStudyResultRecord
-        from .event_study import EventStudyEngine, EventStudySpec
+        from .db import ChannelHypothesis, EventStudyResultRecord
+        from .event_study import EventStudyEngine, funding_spec_from_hypothesis
 
         migrate_database(args.database_url)
         session = make_session_factory(make_engine(args.database_url))()
@@ -266,20 +267,34 @@ def main() -> None:
                 )
             )
             return
-        if args.start is None or args.end is None:
-            raise SystemExit("event-study run requires --start and --end")
+        if args.start is None or args.end is None or not args.hypothesis_id:
+            raise SystemExit(
+                "event-study run requires --start, --end, and --hypothesis-id"
+            )
+        hypothesis = session.get(ChannelHypothesis, args.hypothesis_id)
+        if hypothesis is None:
+            raise SystemExit("event-study hypothesis not found")
+        if hypothesis.status != "TEST_READY":
+            raise SystemExit("event-study hypothesis is not durably TEST_READY")
         start, end = normalize_utc(args.start), normalize_utc(args.end)
         client: LLMClient | None = (
             FakeLLMClient() if args.provider == "fake" else _phase18_client(settings)
         )
-        spec = EventStudySpec.funding_v1(
-            hypothesis_id="EXTREME_FUNDING_FORWARD_RETURN",
-            hypothesis_family_id="EXTREME_FUNDING_FORWARD_RETURN",
+        spec = funding_spec_from_hypothesis(
+            {
+                "hypothesis_id": str(hypothesis.id),
+                "hypothesis_family_id": hypothesis.fingerprint,
+                "condition": hypothesis.condition,
+                "outcome": hypothesis.outcome,
+                "universe": hypothesis.universe,
+                "horizon": hypothesis.horizon,
+                "required_data": hypothesis.required_data,
+                "falsification_criterion": hypothesis.falsification_criterion,
+                "critic_disposition": "ACCEPT",
+            },
             created_at=end,
             sample_start=start,
             sample_end=end,
-            source_dataset="hyperliquid-bounded-history",
-            source_lineage="raw_artifact_receipts + collection_runs",
         )
         print(
             json.dumps(
