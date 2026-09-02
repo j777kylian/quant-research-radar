@@ -117,6 +117,16 @@ def test_event_study_spec_has_immutable_identity() -> None:
     assert spec.spec_hash == spec.spec_id
 
 
+def test_unarchived_observations_are_not_event_or_outcome_inputs() -> None:
+    session = _session()
+    start = datetime(2026, 7, 1, tzinfo=UTC)
+    for hour in range(32):
+        _seed_hour(session, start + timedelta(hours=hour), float(hour), 100.0 + hour)
+    session.commit()
+
+    assert EventDatasetBuilder(session, _spec()).build() == ()
+
+
 def test_future_funding_and_candle_cannot_change_past_event_qualification() -> None:
     session = _session()
     start = datetime(2026, 7, 1, tzinfo=UTC)

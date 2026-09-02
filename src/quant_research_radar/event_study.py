@@ -271,7 +271,8 @@ class EventDatasetBuilder:
         for asset in self.spec.assets:
             funding, candles = self._asset_inputs(asset)
             candle_prices = {
-                when: (price, identifier) for when, price, identifier in candles
+                when: (price, identifier, receipt_ids)
+                for when, price, identifier, receipt_ids in candles
             }
             prefix: list[float] = []
             active_regime: str | None = None
@@ -309,6 +310,9 @@ class EventDatasetBuilder:
                         outcomes[horizon] = math.log(end[0] / start[0])
                         availability[horizon] = "AVAILABLE"
                         source_ids.extend((start[1], end[1]))
+                        receipt_ids = tuple(
+                            sorted(set(receipt_ids).union(start[2], end[2]))
+                        )
                 recent_return = self._return(candle_prices, candle_anchor, 4)
                 recent_volatility = self._volatility(candle_prices, candle_anchor)
                 rows.append(
@@ -338,7 +342,7 @@ class EventDatasetBuilder:
         self, asset: str
     ) -> tuple[
         list[tuple[datetime, float, str, tuple[str, ...]]],
-        list[tuple[datetime, float, str]],
+        list[tuple[datetime, float, str, tuple[str, ...]]],
     ]:
         observations = self.session.scalars(
             select(MarketObservation)
@@ -373,15 +377,24 @@ class EventDatasetBuilder:
             and receipt_map[row.id]
         ]
         candles = [
-            (normalize_utc(row.observed_at), float(row.mark_price), str(row.id))
+            (
+                normalize_utc(row.observed_at),
+                float(row.mark_price),
+                str(row.id),
+                tuple(sorted(receipt_map[row.id])),
+            )
             for row in observations
-            if row.observation_kind == "candle" and row.mark_price is not None
+            if row.observation_kind == "candle"
+            and row.mark_price is not None
+            and receipt_map[row.id]
         ]
         return funding, candles
 
     @staticmethod
     def _return(
-        prices: Mapping[datetime, tuple[float, str]], at: datetime, hours: int
+        prices: Mapping[datetime, tuple[float, str, tuple[str, ...]]],
+        at: datetime,
+        hours: int,
     ) -> float | None:
         start = prices.get(at - timedelta(hours=hours))
         end = prices.get(at)
@@ -391,7 +404,7 @@ class EventDatasetBuilder:
 
     @staticmethod
     def _volatility(
-        prices: Mapping[datetime, tuple[float, str]], at: datetime
+        prices: Mapping[datetime, tuple[float, str, tuple[str, ...]]], at: datetime
     ) -> float | None:
         returns = [
             EventDatasetBuilder._return(prices, at - timedelta(hours=index), 1)
@@ -685,7 +698,15 @@ class EventStudyEngine:
                             self.spec.random_seed + horizon,
                             min(2_000, self.spec.bootstrap_iterations),
                         )
-                        raw_p[f"{level}:{key}"] = item["permutation_p"]
+                        item["test_role"] = (
+                            "PRIMARY"
+                            if level == "observation" and key == "POOLED:24h"
+                            else (
+                                "SECONDARY" if level == "observation" else "EXPLORATORY"
+                            )
+                        )
+                        if item["test_role"] == "SECONDARY":
+                            raw_p[f"{level}:{key}"] = item["permutation_p"]
                     else:
                         item["insufficient"] = (
                             "minimum comparable outcome observations not met"
@@ -701,8 +722,8 @@ class EventStudyEngine:
         pooled_obs = result["observation"].get("POOLED:24h", {})
         pooled_reg = result["regime"].get("POOLED:24h", {})
         if (
-            pooled_obs.get("adjusted_p", 1) < 0.05
-            and pooled_reg.get("adjusted_p", 1) >= 0.05
+            pooled_obs.get("permutation_p", 1) < 0.05
+            and pooled_reg.get("permutation_p", 1) >= 0.05
         ):
             result["warnings"].append("POSSIBLE_PSEUDO_REPLICATION")
         return result
@@ -821,7 +842,7 @@ class EventStudyEngine:
             return EventStudyDisposition.DATA_INSUFFICIENT
         if "POSSIBLE_PSEUDO_REPLICATION" in analyses["warnings"]:
             return EventStudyDisposition.INCONCLUSIVE
-        p = primary.get("adjusted_p")
+        p = primary.get("permutation_p")
         effect = primary.get("effect", {}).get("mean_difference")
         if p is None or effect is None:
             return EventStudyDisposition.DATA_INSUFFICIENT
@@ -905,6 +926,7 @@ class EventStudyEngine:
             "dataset_manifest.json": {
                 "event_count": len(dataset),
                 "event_digest": _sha([_jsonable(asdict(row)) for row in dataset]),
+                "events": [_jsonable(asdict(row)) for row in dataset],
                 "data_lineage": self.spec.source_lineage,
                 "analysis_mode": MODE,
                 "availability_basis": AVAILABILITY_BASIS,
