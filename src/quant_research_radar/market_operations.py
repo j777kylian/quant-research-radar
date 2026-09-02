@@ -208,17 +208,19 @@ def coverage_audit(
         ordered_funding = sorted(funding)
         extreme: list[datetime] = []
         for index, at in enumerate(ordered_funding):
-            prefix = [
+            window = [
                 funding[item].funding_rate
                 for item in ordered_funding[max(0, index - 29) : index + 1]
             ]
+            values = [value for value in window if value is not None]
             rate = funding[at].funding_rate
+            # Strict percentile rank: extreme iff the current rate strictly exceeds
+            # 90% of the trailing 30 same-asset funding observations. Ties are NOT
+            # counted as exceeding, so a dominant ceiling/default rate is ordinary.
             if (
                 rate is not None
-                and prefix
-                and sum(value <= rate for value in prefix if value is not None)
-                / len(prefix)
-                >= 0.9
+                and values
+                and sum(value < rate for value in values) / len(values) >= 0.9
             ):
                 extreme.append(at)
         regimes = sum(
@@ -242,9 +244,15 @@ def coverage_audit(
             asset_name: str, kind: str, rows: dict[datetime, MarketObservation]
         ) -> dict[str, Any]:
             points = sorted(rows)
+            # Funding timestamps carry millisecond jitter around the hour boundary;
+            # gap detection must compare on the native hourly cadence, not raw
+            # sub-second instants, or contiguous hourly events are misread as gaps.
+            hours = [
+                point.replace(minute=0, second=0, microsecond=0) for point in points
+            ]
             gaps = sum(
                 b - a > timedelta(hours=1)
-                for a, b in zip(points, points[1:], strict=False)
+                for a, b in zip(hours, hours[1:], strict=False)
             )
             return {
                 "start": points[0].isoformat() if points else None,

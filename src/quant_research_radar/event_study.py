@@ -284,9 +284,12 @@ class EventDatasetBuilder:
             for at, rate, funding_id, receipt_ids in funding:
                 # Prefix update precedes classification but contains no future funding.
                 prefix.append(rate)
+                # Strict percentile rank: extreme iff rate strictly exceeds 90% of
+                # the trailing 30 same-asset funding observations (ties not counted
+                # as exceeding), so a dominant ceiling/default rate stays ordinary.
                 percentile = (
                     100.0
-                    * sum(value <= rate for value in prefix[-30:])
+                    * sum(value < rate for value in prefix[-30:])
                     / min(30, len(prefix))
                 )
                 treated = percentile >= 90.0

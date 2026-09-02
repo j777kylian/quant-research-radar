@@ -837,6 +837,10 @@ class HyperliquidSource:
             ]
         end = end or datetime.now(UTC)
         start = start or (end - timedelta(hours=max(limit, 2)))
+        # Hyperliquid's candleSnapshot retains only ~5000 hourly candles (~7 months)
+        # and returns empty for older startTime ranges; fundingHistory goes deeper.
+        # Requests older than ~7 months therefore yield no candles — a provider
+        # history limit, not a pagination or collection bug.
         end_ms = int(end.timestamp() * 1000)
         start_ms = int(start.timestamp() * 1000)
         records: list[SourceRecord] = []
