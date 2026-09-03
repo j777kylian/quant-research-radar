@@ -411,6 +411,41 @@ def test_failed_x_request_stays_retryable_and_idempotent() -> None:
         external_post_id=retry.external_post_id,
     )
     assert record2.id == record.id or record2.status == "PUBLISHED"
+    # Crash-safe: a subsequent retry must NOT re-post now that PUBLISHED exists.
+    from quant_research_radar.publication_ops import _already_posted
+
+    assert _already_posted(s, draft) is True
+
+
+def test_already_posted_gate_blocks_repost() -> None:
+    s = _session()
+    from quant_research_radar.publishing import register_publication
+
+    draft = _draft()
+    s.add(draft)
+    s.commit()
+    register_publication(
+        s, draft, platform="X", status="PUBLISHED", external_post_id="existing-1"
+    )
+    settings = _settings(
+        publication_mode="AUTO_PUBLISH",
+        x_api_key="k",
+        x_api_secret="s",
+        x_access_token="t",
+        x_access_secret="sec",
+    )
+
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("must not post again")
+
+    result = publish_draft(
+        draft,
+        settings,
+        research_run_complete=True,
+        already_published=True,
+        transport=httpx.MockTransport(boom),
+    )
+    assert result.status == "REJECTED" and "already published" in (result.reason or "")
 
 
 # ---------------- content ----------------

@@ -126,7 +126,7 @@ def after_daily(
                 draft,
                 settings,
                 research_run_complete=research_complete,
-                already_published=False,
+                already_published=_already_posted(session, draft),
                 media_path=str(visual_path),
             )
             session.add(
@@ -220,6 +220,19 @@ def _draft_by_key(session: Session, key: str) -> PublicationDraft:
     return session.scalars(
         select(PublicationDraft).where(PublicationDraft.idempotence_key == key)
     ).one()
+
+
+def _already_posted(session: Session, draft: PublicationDraft) -> bool:
+    """True if an accepted X post already exists for this draft (crash-safe)."""
+    return (
+        session.scalar(
+            select(PublicationRecord)
+            .where(PublicationRecord.draft_id == draft.id)
+            .where(PublicationRecord.platform == "X")
+            .where(PublicationRecord.status == "PUBLISHED")
+        )
+        is not None
+    )
 
 
 def _visual_numbers(session: Session, event_study_result_id: Any) -> dict[str, float]:
