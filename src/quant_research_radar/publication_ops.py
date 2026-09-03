@@ -118,6 +118,8 @@ def after_daily(
             title="Extreme vs ordinary funding: 24h forward-return difference",
             sample_note="historical reconstructive sample",
         )
+        draft.visual_ids = [visual_path.name]
+        session.commit()
         mode = x_mode(settings)
         if mode == "AUTO_PUBLISH":
             x_result = publish_draft(
@@ -222,11 +224,18 @@ def _draft_by_key(session: Session, key: str) -> PublicationDraft:
 
 def _visual_numbers(session: Session, event_study_result_id: Any) -> dict[str, float]:
     """Chart values come only from structured result records; missing → zeros."""
+    from uuid import UUID
+
     from .db import EventStudyResultRecord
 
     if event_study_result_id is None:
         return {"treatment": 0.0, "ordinary": 0.0}
-    result = session.get(EventStudyResultRecord, event_study_result_id)
+    key = (
+        event_study_result_id
+        if isinstance(event_study_result_id, UUID)
+        else UUID(str(event_study_result_id))
+    )
+    result = session.get(EventStudyResultRecord, key)
     if result is None:
         return {"treatment": 0.0, "ordinary": 0.0}
     pooled = (result.effects or {}).get("observation", {}).get("POOLED:24h", {})
