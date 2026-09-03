@@ -353,6 +353,7 @@ def run_daily(
     return {
         "logical_date": logical_date.isoformat(),
         "status": record.status,
+        "daily_run_id": str(record.id),
         "report": str(report_path),
         "market": market,
         "intelligence_technical_status": intelligence.get("technical_status"),
@@ -553,6 +554,7 @@ def run_weekly(
     return {
         "week_saturday": week_saturday.isoformat(),
         "status": record.status,
+        "weekly_run_id": str(record.id),
         "report": str(report),
         "included_daily_dates": record.included_daily_dates,
         "missing_daily_dates": missing,
@@ -673,10 +675,13 @@ def scheduler_tick(
     }
 
 
-def ops_status(session: Any, *, now: datetime | None = None) -> dict[str, Any]:
+def ops_status(
+    session: Any, *, now: datetime | None = None, settings: Any = None
+) -> dict[str, Any]:
     """Human/machine-readable operational health snapshot."""
     from .scheduler import compute_due
 
+    settings = settings or get_settings()
     bj = beijing_now(now)
     last_daily = _last_daily_date(session)
     last_weekly = _last_weekly_saturday(session)
@@ -685,6 +690,8 @@ def ops_status(session: Any, *, now: datetime | None = None) -> dict[str, Any]:
     registry = {
         entry["source_name"]: entry["adapter_status"] for entry in source_registry()
     }
+    from .publication_ops import publication_status
+
     return {
         "beijing_time": bj.isoformat(),
         "next_daily_due": due.daily_date.isoformat() if due.daily_due else None,
@@ -697,6 +704,10 @@ def ops_status(session: Any, *, now: datetime | None = None) -> dict[str, Any]:
         "supported_sources": {
             name: registry.get(name, "READY")
             for name in (*ACADEMIC_SOURCES, *PRACTITIONER_SOURCES)
+        },
+        "publishing": {
+            "x_mode": settings.publication_mode,
+            **publication_status(session),
         },
     }
 

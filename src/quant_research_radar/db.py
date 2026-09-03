@@ -557,6 +557,96 @@ class WeeklyRun(Base):
     low_frequency_fit: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+# ---------------------------------------------------------------------------
+# Publication / delivery domain.
+#
+# READ-ONLY toward research conclusions: these tables reference research
+# artifacts but must never be used to mutate hypothesis status, empirical
+# results, critic dispositions, knowledge strength, or research ranking.
+# ---------------------------------------------------------------------------
+
+
+class PublicationCandidate(Base):
+    """Something in a completed research cycle worth public evaluation."""
+
+    __tablename__ = "publication_candidates"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_run_id", "category", "title", name="uq_candidate_identity"
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    source_run_id: Mapped[str] = mapped_column(String(64), index=True)
+    source_kind: Mapped[str] = mapped_column(String(20))  # DAILY | WEEKLY
+    category: Mapped[str] = mapped_column(String(40))
+    title: Mapped[str] = mapped_column(String(500))
+    summary: Mapped[str | None] = mapped_column(Text)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    publication_value: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
+class PublicationDraft(Base):
+    """Rendered public copy with claims, source bundle, and policy decision."""
+
+    __tablename__ = "publication_drafts"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    candidate_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("publication_candidates.id"), index=True
+    )
+    policy: Mapped[str] = mapped_column(String(30))
+    language: Mapped[str] = mapped_column(String(20))
+    text: Mapped[str] = mapped_column(Text)
+    claims: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    source_bundle: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    visual_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    idempotence_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
+class PublicationRecord(Base):
+    """Immutable publication history; corrections create new linked records."""
+
+    __tablename__ = "publications"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    draft_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("publication_drafts.id"), index=True
+    )
+    platform: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(
+        String(30)
+    )  # PUBLISHED/REJECTED/FAILED/SKIPPED_*
+    external_post_id: Mapped[str | None] = mapped_column(String(100))
+    failure_reason: Mapped[str | None] = mapped_column(Text)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
+class DeliveryRecord(Base):
+    """One private-delivery attempt identity (idempotent per channel+run)."""
+
+    __tablename__ = "delivery_records"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    channel: Mapped[str] = mapped_column(String(20))  # EMAIL | DISCORD
+    run_kind: Mapped[str] = mapped_column(String(20))  # DAILY | WEEKLY | ALERT
+    run_date: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(20))  # SENT | FAILED | SKIPPED
+    idempotence_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    failure_reason: Mapped[str | None] = mapped_column(Text)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
 def content_hash(text: str, metadata: dict[str, Any] | None = None) -> str:
     value = text + str(sorted((metadata or {}).items()))
     return hashlib.sha256(value.encode()).hexdigest()

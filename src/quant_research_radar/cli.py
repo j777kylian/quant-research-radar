@@ -295,6 +295,20 @@ def main() -> None:
                     archive_root=Path(args.archive_root),
                     settings=settings,
                 )
+                if ops_result.get("status") == "SUCCESS":
+                    from .publication_ops import after_daily
+
+                    ops_result["downstream"] = after_daily(
+                        session,
+                        settings,
+                        daily_run_id=str(ops_result.get("daily_run_id", "")),
+                        logical_date=str(ops_result.get("logical_date")),
+                        market_summary=ops_result.get("market", {}),
+                        report_path=Path(ops_result["report"])
+                        if ops_result.get("report")
+                        else None,
+                        output_root=root / "publication",
+                    )
             else:
                 ops_result = run_weekly(
                     session,
@@ -303,6 +317,19 @@ def main() -> None:
                     output_root=root / "weekly",
                     client=ops_client,
                 )
+                if ops_result.get("status") == "SUCCESS":
+                    from .publication_ops import after_weekly
+
+                    ops_result["downstream"] = after_weekly(
+                        session,
+                        settings,
+                        weekly_run_id=str(ops_result.get("weekly_run_id", "")),
+                        week_saturday=str(ops_result.get("week_saturday")),
+                        report_path=Path(ops_result["report"])
+                        if ops_result.get("report")
+                        else None,
+                        output_root=root / "publication",
+                    )
             print(json.dumps(ops_result, default=str, sort_keys=True))
         finally:
             lock.release()
