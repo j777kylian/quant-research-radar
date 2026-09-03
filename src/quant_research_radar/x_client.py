@@ -7,13 +7,15 @@ Discord, drafts, visuals, or the publication registry.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import os
+import secrets
 import time
 import urllib.parse
-import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -64,11 +66,11 @@ def _oauth1_header(
     credentials: dict[str, str],
     extra_params: dict[str, str] | None = None,
 ) -> str:
-    """Minimal OAuth 1.0a HMAC-SHA256 signature (no third-party dependency)."""
+    """Minimal OAuth 1.0a HMAC-SHA1 signature (base64), no third-party dependency."""
     oauth_params = {
         "oauth_consumer_key": credentials["api_key"],
-        "oauth_nonce": hmac.new(uuid.uuid4().bytes, digestmod="sha256").hexdigest(),
-        "oauth_signature_method": "HMAC-SHA256",
+        "oauth_nonce": secrets.token_urlsafe(16),
+        "oauth_signature_method": "HMAC-SHA1",
         "oauth_timestamp": str(int(time.time())),
         "oauth_token": credentials["access_token"],
         "oauth_version": "1.0",
@@ -87,12 +89,10 @@ def _oauth1_header(
             _percent_encode(credentials["access_secret"]),
         ]
     )
-    signature = hmac.new(
-        signing_key.encode(), base_string.encode(), hashlib.sha256
-    ).digest()
-    oauth_params["oauth_signature"] = urllib.parse.quote(
-        signature.hex(), safe=""
-    )  # hex keeps it simple and deterministic
+    signature = base64.b64encode(
+        hmac.new(signing_key.encode(), base_string.encode(), hashlib.sha1).digest()
+    ).decode()
+    oauth_params["oauth_signature"] = signature
     header = ", ".join(
         f'{_percent_encode(k)}="{_percent_encode(v)}"'
         for k, v in sorted(oauth_params.items())
@@ -172,7 +172,7 @@ def publish_draft(
     if media_path is not None:
         try:
             with httpx.Client(transport=transport, timeout=60) as client:
-                media_bytes = os.path.basename(media_path).encode()
+                media_bytes = Path(media_path).read_bytes()
                 upload = client.post(
                     MEDIA_UPLOAD_URL,
                     data={"command": "UPLOAD"},

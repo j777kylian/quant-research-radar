@@ -23,7 +23,6 @@ from .db import (
 from .delivery import daily_digest_text, send_discord, send_email, weekly_digest_text
 from .publishing import (
     create_draft,
-    find_recent_duplicate,
     render_effect_chart,
     select_daily_candidates,
     select_weekly_candidates,
@@ -103,12 +102,6 @@ def after_daily(
         )
         if draft is None:
             result["publication"] = {"status": "REJECTED", "reason": rejection}
-            continue
-        if (
-            find_recent_duplicate(session, draft.text) is not None
-            and draft.id != _draft_by_key(session, draft.idempotence_key).id
-        ):
-            result["publication"] = {"status": "SKIP_DUPLICATE_TOPIC"}
             continue
         visual_path = render_effect_chart(
             output_root / "visuals",
@@ -214,12 +207,6 @@ def after_weekly(
             "draft_id": str(draft.id),
         }
     return result
-
-
-def _draft_by_key(session: Session, key: str) -> PublicationDraft:
-    return session.scalars(
-        select(PublicationDraft).where(PublicationDraft.idempotence_key == key)
-    ).one()
 
 
 def _already_posted(session: Session, draft: PublicationDraft) -> bool:

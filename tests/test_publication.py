@@ -448,6 +448,47 @@ def test_already_posted_gate_blocks_repost() -> None:
     assert result.status == "REJECTED" and "already published" in (result.reason or "")
 
 
+def test_select_then_create_draft_persists_candidate_id() -> None:
+    """P0 regression: select_daily_candidates returns un-added candidates."""
+    s = _session()
+    from datetime import UTC, datetime
+
+    from quant_research_radar.db import EventStudyResultRecord
+
+    s.add(
+        EventStudyResultRecord(
+            run_id="r",
+            spec_id="s",
+            hypothesis_id="h",
+            hypothesis_family_id="EXTREME_FUNDING_FORWARD_RETURN",
+            disposition="INCONCLUSIVE",
+            treatment_count=1,
+            baseline_count=1,
+            regime_count=1,
+            effects={},
+            robustness={},
+            methodology_critic={},
+            artifact_uri="",
+            code_sha="x",
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+    s.commit()
+    candidates = select_daily_candidates(
+        s, daily_run_id=str(uuid.uuid4()), logical_date="2026-01-02"
+    )
+    assert len(candidates) == 1
+    draft, rejection = create_draft(
+        s,
+        candidates[0],
+        empirical=dict(candidates[0].evidence),
+        structured_numbers={"0": 0.0},
+        language="ENGLISH",
+    )
+    assert draft is not None, rejection
+    assert draft.candidate_id is not None
+
+
 # ---------------- content ----------------
 
 

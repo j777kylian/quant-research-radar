@@ -462,6 +462,9 @@ def create_draft(
     visual_ids: list[str] | None = None,
 ) -> tuple[PublicationDraft | None, str | None]:
     """Build the draft, verify claims, persist. Returns (draft, rejection_reason)."""
+    if candidate.id is None:
+        session.add(candidate)
+        session.flush()
     policy = classify_policy(candidate)
     text = generate_public_copy(candidate, empirical=empirical, language=language)
     verdict = verify_claims(
