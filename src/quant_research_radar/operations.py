@@ -51,16 +51,16 @@ from .sources import (
     collect_isolated,
     source_registry,
 )
+from .user_fit import (
+    FIT_HIGH,
+    FIT_MEDIUM,
+    FIT_OUT_OF_SCOPE,
+    low_frequency_fit,
+)
 
 ACADEMIC_SOURCES = ("openalex", "crossref", "arxiv", "nber", "repec")
 PRACTITIONER_SOURCES = ("alpha-architect", "man-institute", "aqr")
 DAILY_OVERLAP_HOURS = 1
-
-# Low-frequency actionability classification (P0 strategy preference).
-FIT_OUT_OF_SCOPE = "OUT_OF_SCOPE_FOR_USER"
-FIT_LOW = "LOW_FIT"
-FIT_MEDIUM = "MEDIUM_FIT"
-FIT_HIGH = "HIGH_FIT"
 
 
 @dataclass(frozen=True)
@@ -228,7 +228,12 @@ def _market_catch_up(
         end=end,
         code_sha=code_sha,
     )
-    return {**result, "status": "COLLECTED"}
+    return {
+        **result,
+        "status": "COLLECTED",
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+    }
 
 
 def _last_daily_date(session: Session) -> date | None:
@@ -272,19 +277,19 @@ def run_daily(
     session.add(record)
     session.commit()
     reasons: list[str] = []
+    market: dict[str, Any] = {}
+    academic_status: dict[str, str] = {}
+    practitioner_status: dict[str, str] = {}
+    intelligence: dict[str, Any] = {}
     try:
         archive = RawArchive(archive_root)
         market = _market_catch_up(session, archive=archive, code_sha=code_sha)
         record.market_status = "SUCCESS"
-        record.source_health["market"] = market
     except Exception as exc:
         market = {"status": "FAILED", "detail": str(exc)}
         record.market_status = "FAILED"
         reasons.append(f"market: {exc}")
-        record.source_health["market"] = market
 
-    academic_status: dict[str, str] = {}
-    practitioner_status: dict[str, str] = {}
     for label, adapters, attr in (
         ("academic", _research_adapters(settings)[0], "academic_status"),
         ("practitioner", _research_adapters(settings)[1], "practitioner_status"),
@@ -309,8 +314,6 @@ def run_daily(
         except Exception as exc:
             setattr(record, attr, "FAILED")
             reasons.append(f"{label}: {exc}")
-    record.source_health["academic"] = academic_status
-    record.source_health["practitioner"] = practitioner_status
 
     as_of = beijing_now()
     try:
@@ -335,116 +338,73 @@ def run_daily(
         reasons.append(f"intelligence: {exc}")
         intelligence = {"technical_status": "FAILED", "detail": str(exc)}
 
-    report_path = _write_daily_report(
-        daily_root,
-        logical_date,
-        record,
-        market,
-        academic_status,
-        practitioner_status,
-        reasons,
-    )
-    record.audit_status = "SUCCESS"
-    record.report_path = str(report_path)
+    # Finalize durable state FIRST (whole-dict assignment so JSON mutates persist).
+    record.audit_status = "SUCCESS" if not reasons else "FAILED"
+    record.source_health = {
+        "market": market,
+        "academic": academic_status,
+        "practitioner": practitioner_status,
+    }
     record.failure_reasons = reasons
-    record.status = "SUCCESS" if not reasons else "PARTIAL"
+    record.status = (
+        "SUCCESS"
+        if not reasons
+        else ("PARTIAL" if reasons and not _fatal(reasons) else "FAILED")
+    )
     record.ended_at = utcnow()
+    session.commit()
+
+    # THEN render the canonical final report from persisted state (never RUNNING).
+    from .reporting import collect_daily_snapshot, render_daily_markdown
+
+    snapshot = collect_daily_snapshot(session, record.id)
+    report_path = _write_final_report(
+        daily_root, "report.md", snapshot, render_daily_markdown
+    )
+    summary_path = _write_final_summary(daily_root, snapshot)
+    record.report_path = str(report_path)
     session.commit()
     return {
         "logical_date": logical_date.isoformat(),
         "status": record.status,
         "daily_run_id": str(record.id),
         "report": str(report_path),
+        "summary": str(summary_path),
         "market": market,
         "intelligence_technical_status": intelligence.get("technical_status"),
         "failure_reasons": reasons,
     }
 
 
-def _write_daily_report(
-    root: Path,
-    logical_date: date,
-    record: DailyRun,
-    market: dict[str, Any],
-    academic: dict[str, str],
-    practitioner: dict[str, str],
-    reasons: list[str],
+def _fatal(reasons: list[str]) -> bool:
+    """A run is FAILED only if market or analysis failed outright."""
+    return any(
+        reason.startswith("market:") or reason.startswith("intelligence:")
+        for reason in reasons
+    )
+
+
+def _write_final_report(
+    root: Path, name: str, snapshot: dict[str, Any] | None, renderer: Any
 ) -> Path:
-    degraded_academic = [k for k, v in academic.items() if v != "READY"]
-    degraded_practitioner = [k for k, v in practitioner.items() if v != "READY"]
-    lines = [
-        "# Daily Research Report",
-        "",
-        f"- **Logical Beijing date:** {logical_date.isoformat()}",
-        f"- **Run status:** {record.status}",
-        f"- **Market collection:** {market.get('status')} "
-        f"({market.get('start', 'n/a')} → {market.get('end', 'n/a')}, "
-        f"inserted={market.get('inserted', 0)})",
-        f"- **Academic sources:** {'degraded: ' + ', '.join(degraded_academic) if degraded_academic else 'all ready'}",
-        f"- **Practitioner sources:** {'degraded: ' + ', '.join(degraded_practitioner) if degraded_practitioner else 'all ready'}",
-        f"- **Analysis:** {record.analysis_status}",
-        f"- **Knowledge:** {record.knowledge_status}",
-        f"- **LLM:** {'DeepSeek configured' if record.llm_summary.get('deepseek_used') else 'no client (critics NOT_RUN)'}",
-    ]
-    if reasons:
-        lines += ["", "## Failures", ""] + [f"- {reason}" for reason in reasons]
-    lines += ["", f"_Generated {utcnow().isoformat()}_", ""]
-    path = root / "report.md"
-    path.write_text("\n".join(lines), encoding="utf-8")
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / name
+    if snapshot is None:
+        path.write_text(
+            "# Report unavailable\n\nRun state not found.\n", encoding="utf-8"
+        )
+        return path
+    path.write_text(renderer(snapshot), encoding="utf-8")
     return path
 
 
-def low_frequency_fit(horizon: str | None) -> str:
-    """Map a hypothesis horizon string to the user's actionability-fit bucket."""
-    if not horizon:
-        return FIT_OUT_OF_SCOPE
-    text = horizon.lower()
-    minutes: float | None = None
-    if "min" in text:
-        try:
-            minutes = float(
-                "".join(ch for ch in text.split("min")[0] if ch.isdigit() or ch == ".")
-                or 0
-            )
-        except ValueError:
-            minutes = None
-    elif "h" in text and "d" not in text:
-        try:
-            minutes = (
-                float(
-                    "".join(
-                        ch for ch in text.split("h")[0] if ch.isdigit() or ch == "."
-                    )
-                    or 0
-                )
-                * 60
-            )
-        except ValueError:
-            minutes = None
-    elif "d" in text:
-        try:
-            minutes = (
-                float(
-                    "".join(
-                        ch for ch in text.split("d")[0] if ch.isdigit() or ch == "."
-                    )
-                    or 0
-                )
-                * 24
-                * 60
-            )
-        except ValueError:
-            minutes = None
-    if minutes is None:
-        return FIT_OUT_OF_SCOPE
-    hours = minutes / 60
-    if hours < 2:
-        return FIT_OUT_OF_SCOPE
-    if hours < 12:
-        return FIT_LOW
-    if hours < 24:
-        return FIT_MEDIUM
-    return FIT_HIGH
+def _write_final_summary(root: Path, snapshot: dict[str, Any] | None) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "summary.json"
+    path.write_text(
+        json.dumps(snapshot, default=str, sort_keys=True, indent=2), encoding="utf-8"
+    )
+    return path
 
 
 def _rank_priorities(
@@ -529,33 +489,34 @@ def run_weekly(
     high_fit = [p for p in priorities if p["fit"] == FIT_HIGH]
     out_of_scope = [p for p in priorities if p["fit"] == FIT_OUT_OF_SCOPE]
 
-    report = _write_weekly_report(
-        weekly_root,
-        week_saturday,
-        record,
-        hypotheses,
-        recurrent,
-        priorities,
-        high_fit,
-        out_of_scope,
-        missing,
-        reasons,
-    )
     record.priorities = priorities
     record.low_frequency_fit = {
         "high_fit": high_fit,
         "out_of_scope": out_of_scope,
     }
-    record.report_path = str(report)
     record.failure_reasons = reasons
-    record.status = "SUCCESS" if not reasons else "PARTIAL"
+    record.status = (
+        "SUCCESS" if not reasons else ("PARTIAL" if not _fatal(reasons) else "FAILED")
+    )
     record.ended_at = utcnow()
+    session.commit()
+
+    # THEN render the canonical final report from persisted state.
+    from .reporting import collect_weekly_snapshot, render_weekly_markdown
+
+    snapshot = collect_weekly_snapshot(session, record.id)
+    report = _write_final_report(
+        weekly_root, "report.md", snapshot, render_weekly_markdown
+    )
+    summary_path = _write_final_summary(weekly_root, snapshot)
+    record.report_path = str(report)
     session.commit()
     return {
         "week_saturday": week_saturday.isoformat(),
         "status": record.status,
         "weekly_run_id": str(record.id),
         "report": str(report),
+        "summary": str(summary_path),
         "included_daily_dates": record.included_daily_dates,
         "missing_daily_dates": missing,
         "hypothesis_count": len(hypotheses),
@@ -564,52 +525,74 @@ def run_weekly(
     }
 
 
-def _write_weekly_report(
-    root: Path,
-    week_saturday: date,
-    record: WeeklyRun,
-    hypotheses: list[ChannelHypothesis],
-    recurrent: dict[str, int],
-    priorities: list[dict[str, Any]],
-    high_fit: list[dict[str, Any]],
-    out_of_scope: list[dict[str, Any]],
-    missing: list[str],
-    reasons: list[str],
-) -> Path:
-    lines = [
-        "# Weekly Research Review",
-        "",
-        f"**Week of:** {week_saturday.isoformat()}",
-        f"**Status:** {record.status}",
-        "",
-        "## System health",
-        f"- Included Daily runs: {len(record.included_daily_dates)}",
-        f"- Missing Daily runs: {', '.join(missing) if missing else 'none'}",
-        f"- New/recurrent hypotheses: {len(hypotheses)} total, "
-        f"{len(recurrent)} recurrent families",
-        "",
-        "## Low-frequency fit",
-        f"- HIGH-FIT candidates: {len(high_fit)}",
-        f"- OUT-OF-SCOPE (scientifically retained): {len(out_of_scope)}",
-        "",
-        "## Top research priorities",
-    ]
-    if priorities:
-        for index, priority in enumerate(priorities, start=1):
-            lines += [
-                f"{index}. **{priority['hypothesis_family']}** "
-                f"(fit={priority['fit']}, horizon={priority['horizon']})",
-                f"   - {priority['statement']}",
-                f"   - prior empirical: {priority['prior_empirical_disposition']}",
-            ]
-    else:
-        lines.append("_No priorities this week._")
-    if reasons:
-        lines += ["", "## Failures", ""] + [f"- {r}" for r in reasons]
-    lines += ["", f"_Generated {utcnow().isoformat()}_", ""]
-    path = root / "report.md"
-    path.write_text("\n".join(lines), encoding="utf-8")
-    return path
+def regenerate_report(
+    session: Session,
+    *,
+    logical_date: str | None = None,
+    week_saturday: str | None = None,
+    output_root: Path,
+) -> dict[str, Any]:
+    """Regenerate a final report from persisted state ONLY (no research rerun).
+
+    Refuses to render a RUNNING run; renders the canonical report.md +
+    summary.json from the durable Daily/Weekly record.
+    """
+    from .reporting import (
+        collect_daily_snapshot,
+        collect_weekly_snapshot,
+        render_daily_markdown,
+        render_weekly_markdown,
+    )
+
+    if week_saturday:
+        weekly_record: WeeklyRun | None = session.scalars(
+            select(WeeklyRun)
+            .where(WeeklyRun.week_saturday == date.fromisoformat(week_saturday))
+            .order_by(WeeklyRun.started_at.desc())
+            .limit(1)
+        ).first()
+        if weekly_record is None:
+            raise ValueError(f"no weekly run for {week_saturday}")
+        if weekly_record.status == "RUNNING":
+            raise RuntimeError("refusing to render a RUNNING weekly as final")
+        root = output_root / f"week-{week_saturday}"
+        snapshot = collect_weekly_snapshot(session, weekly_record.id)
+        report = _write_final_report(
+            root, "report.md", snapshot, render_weekly_markdown
+        )
+        summary_path = _write_final_summary(root, snapshot)
+        return {
+            "kind": "WEEKLY",
+            "week_saturday": week_saturday,
+            "report": str(report),
+            "summary": str(summary_path),
+            "network_calls": 0,
+            "llm_calls": 0,
+        }
+    if logical_date:
+        daily_record: DailyRun | None = session.scalars(
+            select(DailyRun)
+            .where(DailyRun.logical_date == date.fromisoformat(logical_date))
+            .order_by(DailyRun.started_at.desc())
+            .limit(1)
+        ).first()
+        if daily_record is None:
+            raise ValueError(f"no daily run for {logical_date}")
+        if daily_record.status == "RUNNING":
+            raise RuntimeError("refusing to render a RUNNING daily as final")
+        root = output_root / logical_date
+        snapshot = collect_daily_snapshot(session, daily_record.id)
+        report = _write_final_report(root, "report.md", snapshot, render_daily_markdown)
+        summary_path = _write_final_summary(root, snapshot)
+        return {
+            "kind": "DAILY",
+            "logical_date": logical_date,
+            "report": str(report),
+            "summary": str(summary_path),
+            "network_calls": 0,
+            "llm_calls": 0,
+        }
+    raise ValueError("provide logical_date or week_saturday")
 
 
 def scheduler_tick(
@@ -678,7 +661,12 @@ def scheduler_tick(
 def ops_status(
     session: Any, *, now: datetime | None = None, settings: Any = None
 ) -> dict[str, Any]:
-    """Human/machine-readable operational health snapshot."""
+    """Human/machine-readable operational health snapshot.
+
+    Distinguishes SOURCE CAPABILITY (configured adapter state) from the last
+    Daily run's per-source RETRIEVAL OUTCOME, and reports a deterministic next
+    Daily due date even when today's Daily is already complete.
+    """
     from .scheduler import compute_due
 
     settings = settings or get_settings()
@@ -692,19 +680,44 @@ def ops_status(
     }
     from .publication_ops import publication_status
 
+    # Deterministic next Daily due date (next 18:30 Beijing boundary).
+    from .scheduler import DAILY_DUE_TIME
+
+    if bj.time() < DAILY_DUE_TIME:
+        next_daily = bj.date().isoformat()
+    else:
+        next_daily = (bj.date() + timedelta(days=1)).isoformat()
+
+    last_daily_row = None
+    last_run_source_outcomes: dict[str, str] = {}
+    if last_daily is not None:
+        last_daily_row = session.scalars(
+            select(DailyRun)
+            .where(DailyRun.logical_date == last_daily)
+            .order_by(DailyRun.started_at.desc())
+            .limit(1)
+        ).first()
+        if last_daily_row is not None:
+            for group in ("academic", "practitioner"):
+                outcomes = last_daily_row.source_health.get(group, {})
+                if isinstance(outcomes, dict):
+                    last_run_source_outcomes.update(outcomes)
+
     return {
         "beijing_time": bj.isoformat(),
-        "next_daily_due": due.daily_date.isoformat() if due.daily_due else None,
+        "next_daily_due": next_daily,
         "last_daily_date": last_daily.isoformat() if last_daily else None,
+        "last_daily_status": last_daily_row.status if last_daily_row else None,
         "last_weekly_saturday": last_weekly.isoformat() if last_weekly else None,
         "market_watermark": watermark.isoformat() if watermark else None,
         "daily_due": due.daily_due,
         "weekly_due": due.weekly_due,
         "database_url": str(session.get_bind().engine.url).replace(":pass", ":****"),
-        "supported_sources": {
+        "source_capability": {
             name: registry.get(name, "READY")
             for name in (*ACADEMIC_SOURCES, *PRACTITIONER_SOURCES)
         },
+        "last_daily_source_run_outcomes": last_run_source_outcomes,
         "publishing": {
             "x_mode": settings.publication_mode,
             **publication_status(session),

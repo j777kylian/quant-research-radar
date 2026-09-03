@@ -6,16 +6,16 @@ from sqlalchemy.orm import Session
 
 from quant_research_radar.db import Base, RawArtifactReceipt
 from quant_research_radar.market_operations import run_live_market_collection
-from quant_research_radar.operations import (
+from quant_research_radar.operations import OperationsLock
+from quant_research_radar.raw_archive import RawArchive
+from quant_research_radar.sources import HyperliquidSource
+from quant_research_radar.user_fit import (
     FIT_HIGH,
     FIT_LOW,
     FIT_MEDIUM,
     FIT_OUT_OF_SCOPE,
-    OperationsLock,
     low_frequency_fit,
 )
-from quant_research_radar.raw_archive import RawArchive
-from quant_research_radar.sources import HyperliquidSource
 
 
 def test_low_frequency_fit_buckets() -> None:

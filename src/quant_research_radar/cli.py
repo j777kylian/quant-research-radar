@@ -193,13 +193,17 @@ def main() -> None:
     operations.add_argument("--audit-output")
     operations.add_argument("--code-sha", default="")
     ops = sub.add_parser("ops")
-    ops.add_argument("action", choices=["daily", "weekly", "status", "tick"])
+    ops.add_argument(
+        "action",
+        choices=["daily", "weekly", "status", "tick", "daily-report", "weekly-report"],
+    )
     ops.add_argument("--database-url", default=None)
     ops.add_argument("--output-root", default="outputs/operations")
     ops.add_argument("--archive-root", default="data/raw")
     ops.add_argument("--code-sha", default="")
     ops.add_argument("--force", action="store_true")
     ops.add_argument("--now", type=datetime.fromisoformat, default=None)
+    ops.add_argument("--date", default=None)
     event_study = sub.add_parser("event-study")
     event_study.add_argument("action", choices=["run", "list", "show"])
     event_study.add_argument("--database-url", required=True)
@@ -271,6 +275,29 @@ def main() -> None:
                         archive_root=Path(args.archive_root),
                         code_sha=args.code_sha,
                         now=args.now,
+                    ),
+                    default=str,
+                    sort_keys=True,
+                )
+            )
+            return
+        if args.action in ("daily-report", "weekly-report"):
+            from .operations import regenerate_report
+
+            base = Path(args.output_root) / (
+                "daily" if args.action == "daily-report" else "weekly"
+            )
+            print(
+                json.dumps(
+                    regenerate_report(
+                        session,
+                        logical_date=args.date
+                        if args.action == "daily-report"
+                        else None,
+                        week_saturday=args.date
+                        if args.action == "weekly-report"
+                        else None,
+                        output_root=base,
                     ),
                     default=str,
                     sort_keys=True,
