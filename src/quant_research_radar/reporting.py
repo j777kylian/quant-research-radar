@@ -57,11 +57,16 @@ def _find_market_run(session: Session, daily: DailyRun) -> CollectionRun | None:
     ).first()
 
 
-def _intelligence_audit(daily: DailyRun) -> dict[str, Any] | None:
-    if not daily.report_path:
+def _intelligence_audit(
+    daily: DailyRun, intelligence_root: Path | None = None
+) -> dict[str, Any] | None:
+    if intelligence_root is not None:
+        path = intelligence_root / "audit.json"
+    elif daily.report_path:
+        root = Path(daily.report_path).resolve().parent
+        path = root / "intelligence" / "audit.json"
+    else:
         return None
-    root = Path(daily.report_path).resolve().parent
-    path = root / "intelligence" / "audit.json"
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
         return loaded if isinstance(loaded, dict) else None
@@ -99,13 +104,13 @@ def _prior_empirical(session: Session, family: str) -> dict[str, Any] | None:
 
 
 def collect_daily_snapshot(
-    session: Session, daily_run_id: Any
+    session: Session, daily_run_id: Any, intelligence_root: Path | None = None
 ) -> dict[str, Any] | None:
     daily = session.get(DailyRun, daily_run_id)
     if daily is None:
         return None
     market_run = _find_market_run(session, daily)
-    audit = _intelligence_audit(daily)
+    audit = _intelligence_audit(daily, intelligence_root)
     hypotheses = _hypotheses_for_day(session, daily.logical_date)
 
     market: dict[str, Any] = {"status": daily.market_status}

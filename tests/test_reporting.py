@@ -267,6 +267,34 @@ def test_weekly_markdown_lists_included_and_bounded(tmp_path: Path) -> None:
     assert len(snapshot["priorities"]) <= 5
 
 
+def test_live_run_snapshot_finds_audit_without_report_path(tmp_path: Path) -> None:
+    """P1 regression: run_daily renders BEFORE report_path is set; the snapshot
+    must still reach the intelligence audit via the explicit root."""
+    session, tmp = _session(tmp_path)
+    daily = _daily(session, root=tmp)  # report_path set, but simulate unset
+    daily.report_path = None
+    session.commit()
+    audit_dir = tmp / "daily" / "2026-09-03" / "intelligence"
+    audit_dir.mkdir(parents=True)
+    (audit_dir / "audit.json").write_text(
+        json.dumps(
+            {
+                "new_hypothesis_families": ["market|fam|btc|4h and 24h"],
+                "technical_status": "CRITIC_REQUEST_DATA",
+                "critics": {"methodology_critic": {"disposition": "REQUEST_DATA"}},
+                "knowledge": {
+                    "prior_context": [{"novelty": "NEW", "occurrence_count": 0}]
+                },
+            }
+        )
+    )
+    snapshot = collect_daily_snapshot(session, daily.id, intelligence_root=audit_dir)
+    research = snapshot["research"]
+    assert research["new_count"] == 1
+    assert research["technical_status"] == "CRITIC_REQUEST_DATA"
+    assert research["critics"] == {"methodology_critic": "REQUEST_DATA"}
+
+
 def test_daily_conclusion_zero_output() -> None:
     assert (
         "No high-priority low-frequency research candidate emerged today"
