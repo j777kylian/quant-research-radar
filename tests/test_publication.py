@@ -1,9 +1,10 @@
 """Publication/delivery regression coverage (P0-1..P0-25 invariants)."""
 
 import uuid
+from pathlib import Path
 
 import httpx
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from quant_research_radar.config import Settings
@@ -12,6 +13,7 @@ from quant_research_radar.db import (
     ChannelHypothesis,
     DailyRun,
     PublicationCandidate,
+    PublicationDraft,
 )
 from quant_research_radar.delivery import (
     delivery_key,
@@ -586,16 +588,79 @@ def test_no_edge_day_can_still_select_paper_candidate() -> None:
     assert any(c.category == "PAPER_EXPLAINER" for c in candidates)
     best, _ = select_editorial_daily_candidate(candidates)
     assert best is not None
+    # Mirror the after_daily drafting shape (regression: papers must not be
+    # rejected by study-only numeric/maturity gates).
+    empirical = dict(best.evidence)
+    has_study = bool(empirical.get("event_study_result_id"))
+    if has_study:
+        empirical.setdefault("disposition", "INCONCLUSIVE")
+    structured = {"0": 0.0} if has_study else {}
     draft, rejection = create_draft(
         s,
         best,
-        empirical={},
-        structured_numbers={},
+        empirical=empirical,
+        structured_numbers=structured,
         language="ENGLISH",
     )
     assert draft is not None, rejection
     assert "A paper worth reading about market microstructure" in draft.text
     assert "arxiv.org" in draft.text
+
+
+def test_after_daily_paper_day_drafts_instead_of_rejecting(tmp_path: Path) -> None:
+    """End-to-end: a paper-only (no-edge) day drafts through after_daily."""
+    import os
+    from datetime import UTC, date, datetime
+
+    from quant_research_radar.db import DailyRun, SourceItem
+    from quant_research_radar.publication_ops import after_daily
+
+    s = _session()
+    daily = DailyRun(
+        logical_date=date(2026, 1, 2),
+        status="SUCCESS",
+        market_status="SUCCESS",
+        academic_status="SUCCESS",
+        practitioner_status="SUCCESS",
+        analysis_status="SUCCESS",
+        knowledge_status="SUCCESS",
+        audit_status="SUCCESS",
+        code_sha="abc",
+        llm_summary={},
+        source_health={},
+        failure_reasons=[],
+    )
+    s.add(daily)
+    s.add(
+        SourceItem(
+            source_type="academic",
+            source_name="arxiv",
+            external_id="2609.12345",
+            canonical_url="http://arxiv.org/abs/2609.12345",
+            title="On the persistence of funding regimes",
+            authors=["R. Author"],
+            published_at=datetime(2026, 1, 1, tzinfo=UTC),
+            retrieved_at=datetime(2026, 1, 1, 10, 0, tzinfo=UTC),
+            content_sha256="y",
+        )
+    )
+    s.commit()
+    settings = _settings(publication_mode="DRAFT_ONLY")
+    os.makedirs(tmp_path, exist_ok=True)
+    result = after_daily(
+        s,
+        settings,
+        daily_run_id=str(daily.id),
+        logical_date="2026-01-02",
+        market_summary={"status": "SUCCESS", "inserted": 1},
+        report_path=tmp_path / "report.md",
+        output_root=tmp_path,
+    )
+    pub = result["publication"]
+    assert pub["status"] == "DRAFT_ONLY", pub
+    assert pub.get("category") == "PAPER_EXPLAINER"
+    draft = s.scalars(select(PublicationDraft)).one()
+    assert "On the persistence of funding regimes" in draft.text
 
 
 def test_paper_explainer_copy_keeps_source_lineage() -> None:

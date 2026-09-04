@@ -251,7 +251,7 @@ def select_daily_candidates(
         )
 
     # Newly retrieved academic works in the window (paper explainers).
-    from .db import SourceItem
+    from .db import PublicationDraft, SourceItem
 
     papers = session.scalars(
         select(SourceItem)
@@ -262,9 +262,18 @@ def select_daily_candidates(
         )
         .where(SourceItem.retrieved_at <= day_end)
         .order_by(SourceItem.retrieved_at.desc())
-        .limit(3)
+        .limit(8)
     ).all()
+    # Topic-level repetition control: skip papers whose title is already
+    # covered by any existing draft (published or not).
+    existing_texts = [
+        draft.text[:500].lower()
+        for draft in session.scalars(select(PublicationDraft)).all()
+    ]
     for paper in papers:
+        title_key = (paper.title or "").lower()
+        if any(title_key and title_key in text for text in existing_texts):
+            continue
         value = publication_value_score(
             {
                 "clarity": 4,
@@ -626,10 +635,13 @@ def generate_public_copy(
     else:
         # EMPIRICAL_RESULT / NEGATIVE_RESULT / INCONCLUSIVE_RESULT / WEEKLY_NEGATIVE_RESULT
         concentration = (empirical or {}).get("asset_concentration") or "cross-asset"
+        disposition_label = MATURITY_PHRASES.get(
+            str(disposition), str(disposition).lower()
+        )
         body = (
             f"We tested whether extreme perpetual funding is associated with subsequent returns.\n\n"
             f"Core evidence: the pooled 24h extreme-vs-ordinary comparison completed with "
-            f"disposition {disposition} ({concentration}).\n\n"
+            f"disposition {disposition_label} ({concentration}).\n\n"
             f"Interpretation: this is an in-sample association in a historical reconstructive "
             f"sample, not a trading signal.\n\n"
             f"Limitation: the methodology critic could not fully validate the study; "

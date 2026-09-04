@@ -129,8 +129,13 @@ def after_daily(
         }
         return result
     empirical = dict(selected.evidence)
-    empirical.setdefault("disposition", "INCONCLUSIVE")
-    structured = {"0": 0.0}  # deterministic copy uses no invented numbers
+    # Study-shape gates (disposition + structured numbers) apply only to
+    # event-study-backed candidates; paper/process candidates must not inherit
+    # a forced INCONCLUSIVE or a numeric claim gate they cannot satisfy.
+    has_study = bool(empirical.get("event_study_result_id"))
+    if has_study:
+        empirical.setdefault("disposition", "INCONCLUSIVE")
+    structured = {"0": 0.0} if has_study else {}
     draft, rejection = create_draft(
         session,
         selected,
@@ -145,15 +150,17 @@ def after_daily(
             "category": selected.category,
         }
         return result
-    visual_path = render_effect_chart(
-        output_root / "visuals",
-        structured_numbers=_visual_numbers(
-            session, empirical.get("event_study_result_id")
-        ),
-        title="Extreme vs ordinary funding: 24h forward-return difference",
-        sample_note="historical reconstructive sample",
-    )
-    draft.visual_ids = [visual_path.name]
+    visual_path: Path | None = None
+    if has_study:
+        visual_path = render_effect_chart(
+            output_root / "visuals",
+            structured_numbers=_visual_numbers(
+                session, empirical.get("event_study_result_id")
+            ),
+            title="Extreme vs ordinary funding: 24h forward-return difference",
+            sample_note="historical reconstructive sample",
+        )
+    draft.visual_ids = [visual_path.name] if visual_path is not None else []
     session.commit()
     mode = x_mode(settings)
     if mode == "AUTO_PUBLISH":
@@ -162,7 +169,7 @@ def after_daily(
             settings,
             research_run_complete=research_complete,
             already_published=_already_posted(session, draft),
-            media_path=str(visual_path),
+            media_path=str(visual_path) if visual_path is not None else None,
         )
         session.add(
             PublicationRecord(
