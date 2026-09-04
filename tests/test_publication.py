@@ -7,6 +7,7 @@ import httpx
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from quant_research_radar import cli as cli_module
 from quant_research_radar.config import Settings
 from quant_research_radar.db import (
     Base,
@@ -605,9 +606,8 @@ def test_no_edge_day_can_still_select_paper_candidate() -> None:
         structured_numbers=structured,
         language="ENGLISH",
     )
-    assert draft is not None, rejection
-    assert "A paper worth reading about market microstructure" in draft.text
-    assert "arxiv.org" in draft.text
+    assert draft is None
+    assert rejection and "SOURCE_DEPTH_TOO_SHALLOW" in rejection
 
 
 def test_after_daily_paper_day_drafts_instead_of_rejecting(tmp_path: Path) -> None:
@@ -660,22 +660,21 @@ def test_after_daily_paper_day_drafts_instead_of_rejecting(tmp_path: Path) -> No
         output_root=tmp_path,
     )
     pub = result["publication"]
-    assert pub["status"] == "DRAFT_ONLY", pub
-    assert pub.get("category") == "PAPER_EXPLAINER"
-    draft = s.scalars(select(PublicationDraft)).one()
-    assert "On the persistence of funding regimes" in draft.text
+    assert pub["status"] == "ZERO_POST", pub
+    assert s.scalars(select(PublicationDraft)).first() is None
     package = s.scalars(select(DailySocialEditorialPackage)).one()
-    assert package.recommendation == "PUBLISH"
+    assert package.recommendation == "SKIP"
     package_dir = tmp_path / "social" / "2026-01-02"
     assert {p.name for p in package_dir.iterdir()} >= {
         "summary.json",
         "editorial.md",
         "sources.json",
-        "draft.md",
     }
     summary = __import__("json").loads((package_dir / "summary.json").read_text())
-    assert summary["recommendation"] == "PUBLISH"
-    assert summary["verification"]["status"] == "PASS"
+    assert summary["recommendation"] == "SKIP"
+    assert (
+        summary["rejection_history"][0]["rejection_code"] == "SOURCE_DEPTH_TOO_SHALLOW"
+    )
 
 
 def test_paper_explainer_copy_keeps_source_lineage() -> None:
@@ -800,3 +799,119 @@ def test_social_package_failure_isolated_from_research(tmp_path: Path) -> None:
     blocked.write_text("x", encoding="utf-8")
     assert not _persist_social_package(s, daily, [], None, "SKIP", "test", blocked)
     assert s.get(DailyRun, daily.id).status == "SUCCESS"
+
+
+# ---------------- editorial quality closeout ----------------
+
+
+def _paper_candidate(*, abstract: str = "", raw_text: str = "") -> PublicationCandidate:
+    return PublicationCandidate(
+        source_run_id=str(uuid.uuid4()),
+        source_kind="DAILY",
+        category="PAPER_EXPLAINER",
+        title="Funding and market microstructure",
+        summary="Academic paper",
+        evidence={
+            "source_item_id": str(uuid.uuid4()),
+            "source_name": "arxiv",
+            "url": "https://arxiv.org/abs/1",
+            "authors": ["A. Author"],
+            "abstract": abstract,
+            "raw_text": raw_text,
+        },
+        publication_value=publication_value_score(
+            {"clarity": 2, "source_depth": 3, "active_topic_relevance": 3}
+        ),
+    )
+
+
+def test_metadata_only_paper_is_rejected_with_stable_reason() -> None:
+    from quant_research_radar.publishing import substantive_content_verdict
+
+    verdict = substantive_content_verdict(_paper_candidate())
+    assert verdict["status"] == "FAIL"
+    assert verdict["code"] == "SOURCE_DEPTH_TOO_SHALLOW"
+
+
+def test_abstract_paper_generates_substantive_copy_and_passes() -> None:
+    from quant_research_radar.publishing import (
+        generate_public_copy,
+        substantive_content_verdict,
+    )
+
+    candidate = _paper_candidate(
+        abstract=(
+            "We study whether perpetual funding predicts crypto returns. "
+            "Using panel regressions on hourly exchange data, we find extreme "
+            "funding is associated with short-horizon reversal. The result is "
+            "limited by observational confounding and motivates out-of-sample tests."
+        )
+    )
+    assert substantive_content_verdict(candidate)["status"] == "PASS"
+    copy = generate_public_copy(candidate, empirical=None)
+    assert "Question:" in copy and "Method:" in copy and "Takeaway:" in copy
+
+
+def test_generic_paper_copy_fails_reader_usefulness() -> None:
+    from quant_research_radar.publishing import copy_quality_verdict
+
+    candidate = _paper_candidate(abstract="A method and result are described.")
+    verdict = copy_quality_verdict(
+        candidate,
+        "A paper exists. Read the original for details. This is for research context.",
+    )
+    assert verdict["status"] == "FAIL"
+    assert verdict["code"] == "READER_USEFULNESS_FAILED"
+
+
+def test_short_copy_is_not_thread() -> None:
+    from quant_research_radar.publishing import select_content_format
+
+    assert select_content_format("One concrete result.") == "SHORT_POST"
+
+
+def test_cli_historical_evaluation_uses_fallback_pipeline(monkeypatch, capsys) -> None:
+    """The public CLI must use the same ranked quality pipeline as after_daily."""
+    import sys
+    from datetime import date
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    daily = DailyRun(logical_date=date(2026, 9, 3), status="SUCCESS", code_sha="test")
+    session.add(daily)
+    session.commit()
+    monkeypatch.setattr(cli_module, "get_settings", lambda: _settings())
+    monkeypatch.setattr(cli_module, "make_engine", lambda _: engine)
+    monkeypatch.setattr(cli_module, "migrate_database", lambda _: None)
+    first = _candidate(str(daily.id))
+    second = _candidate(str(daily.id))
+    second.title = "A substantive fallback story"
+    calls = {"evaluate": 0}
+
+    def fake_candidates(*args, **kwargs):
+        return [first, second]
+
+    def fake_evaluate(*args, **kwargs):
+        calls["evaluate"] += 1
+        return {"selected": second, "draft": None, "rejections": []}
+
+    monkeypatch.setattr(
+        "quant_research_radar.publishing.select_daily_candidates", fake_candidates
+    )
+    monkeypatch.setattr(
+        "quant_research_radar.publishing.evaluate_editorial_candidates", fake_evaluate
+    )
+    monkeypatch.setattr(
+        sys, "argv", ["quant-radar", "publish", "evaluate", "--date", "2026-09-03"]
+    )
+    cli_module.main()
+    assert calls["evaluate"] == 1
+    assert "SKIP" in capsys.readouterr().out
+
+
+def test_verification_failure_cannot_report_pass() -> None:
+    from quant_research_radar.publishing import verification_verdict
+
+    verdict = verification_verdict([], reason="source verification failed")
+    assert verdict["status"] == "FAIL"

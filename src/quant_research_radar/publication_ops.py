@@ -37,9 +37,10 @@ from .publishing import (
     PUBLISHABLE,
     classify_policy,
     create_draft,
+    evaluate_editorial_candidates,
     render_effect_chart,
+    select_content_format,
     select_daily_candidates,
-    select_editorial_daily_candidate,
     select_weekly_candidates,
 )
 from .x_client import publish_draft, x_mode
@@ -71,7 +72,11 @@ def _persist_social_package_impl(
             select(TopicBrief).where(TopicBrief.source_run_id == str(daily.id))
         ).all()
     ]
-    bundle = metadata.get("source_bundle") or {}
+    bundle = dict(metadata.get("source_bundle") or {})
+    if metadata.get("rejection_history"):
+        bundle["rejection_history"] = metadata["rejection_history"]
+    if metadata.get("visual_ids"):
+        bundle["visual_ids"] = metadata["visual_ids"]
     if recommendation == "PUBLISH":
         checks = {
             "selected_candidate": selected is not None,
@@ -85,10 +90,12 @@ def _persist_social_package_impl(
         if failed:
             recommendation = "SKIP"
             reason = "publish preconditions failed: " + ", ".join(failed)
-    fmt = metadata.get("format", "THREAD" if len(candidates) > 3 else "SHORT_POST")
+    fmt = metadata.get("format") or select_content_format(draft_text or "")
     selected_meta = metadata.get("selected") or {}
-    selected_topic_id = metadata.get("selected_topic_id") or selected_meta.get(
-        "topic_id"
+    selected_topic_id = (
+        metadata.get("selected_topic_id")
+        or selected_meta.get("topic_id")
+        or ((selected.evidence or {}).get("topic_id") if selected else None)
     )
     selected_category = selected_meta.get("category") or (
         selected.category if selected else None
@@ -122,6 +129,7 @@ def _persist_social_package_impl(
         "draft_id": metadata.get("draft_id"),
         "source_bundle": bundle,
         "visual_ids": metadata.get("visual_ids", []),
+        "rejection_history": metadata.get("rejection_history", []),
         "generated_at": datetime.now(UTC).isoformat(),
         "editorial_version": metadata.get("editorial_version", "social-editorial-v1"),
         "candidate_themes": [
@@ -148,6 +156,13 @@ def _persist_social_package_impl(
             *[
                 f"- {c.category}: {c.title} (score {(c.publication_value or {}).get('total', 0)})"
                 for c in candidates
+            ],
+            "",
+            "## Rejected candidates",
+            *[
+                f"- {r.get('rank')}. {r.get('title')} [{r.get('rejection_code')}] {r.get('reason')}"
+                for r in metadata.get("rejection_history", [])
+                if r.get("rejection_code")
             ],
             "",
             f"## Rationale\n{reason}",
@@ -401,11 +416,17 @@ def after_daily(
             output_root,
         )
         return result
-    selected, editorial = select_editorial_daily_candidate(candidates)
-    if selected is None:
+    evaluation = evaluate_editorial_candidates(
+        session, candidates, language=settings.publication_language
+    )
+    selected = evaluation["selected"]
+    draft = evaluation["draft"]
+    rejection_history = evaluation["rejections"]
+    editorial = {"reason": "first ranked candidate passing all editorial gates"}
+    if selected is None or draft is None:
         result["publication"] = {
             "status": "ZERO_POST",
-            "reason": editorial.get("reason", "no publishable candidate"),
+            "reason": "all candidates failed editorial gates",
             "pool": [c.category for c in candidates],
         }
         _persist_social_package(
@@ -414,41 +435,13 @@ def after_daily(
             candidates,
             None,
             "SKIP",
-            editorial.get("reason", "no publishable candidate"),
+            "all candidates failed editorial gates",
             output_root,
+            metadata={"rejection_history": rejection_history},
         )
         return result
-    empirical = dict(selected.evidence)
-    # Study-shape gates (disposition + structured numbers) apply only to
-    # event-study-backed candidates; paper/process candidates must not inherit
-    # a forced INCONCLUSIVE or a numeric claim gate they cannot satisfy.
+    empirical = dict(selected.evidence or {})
     has_study = bool(empirical.get("event_study_result_id"))
-    if has_study:
-        empirical.setdefault("disposition", "INCONCLUSIVE")
-    structured = {"0": 0.0} if has_study else {}
-    draft, rejection = create_draft(
-        session,
-        selected,
-        empirical=empirical,
-        structured_numbers=structured,
-        language=settings.publication_language,
-    )
-    if draft is None:
-        result["publication"] = {
-            "status": "REJECTED",
-            "reason": rejection,
-            "category": selected.category,
-        }
-        _persist_social_package(
-            session,
-            record,
-            candidates,
-            selected,
-            "SKIP",
-            rejection or "copy verification failed",
-            output_root,
-        )
-        return result
     visual_path: Path | None = None
     if has_study:
         visual_path = render_effect_chart(
@@ -508,8 +501,9 @@ def after_daily(
                 "category": selected.category,
             },
             "score": selected.publication_value,
+            "format": select_content_format(draft.text),
             "policy": classify_policy(selected),
-            "verification": {"status": "PASS", "claims": draft.claims},
+            "verification": {"status": "PASS", "claims": draft.claims, "reason": None},
             "copy_quality": {
                 "status": "PASS",
                 "nonempty": bool(draft.text.strip()),
@@ -523,6 +517,7 @@ def after_daily(
                 if k.endswith("_id") and v
             ],
             "visual_ids": list(draft.visual_ids),
+            "rejection_history": rejection_history,
         },
     )
     return result

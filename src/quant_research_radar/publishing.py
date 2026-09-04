@@ -29,6 +29,7 @@ from .db import (  # noqa: E402
     PublicationCandidate,
     PublicationDraft,
     PublicationRecord,
+    TopicBrief,
     WeeklyRun,
     utcnow,
 )
@@ -224,6 +225,13 @@ def select_daily_candidates(
         key=lambda h: (h.channel != "MARKET", -float(h.created_at.timestamp()))
     )
     seen_families: set[str] = set()
+    topic_briefs = session.scalars(
+        select(TopicBrief).where(TopicBrief.source_run_id == daily_run_id)
+    ).all()
+    topic_by_title = {
+        (topic.human_title or "").strip().rstrip("."): str(topic.id)
+        for topic in topic_briefs
+    }
     for hypothesis in hypotheses:
         family = hypothesis.fingerprint
         if family in seen_families:
@@ -245,6 +253,15 @@ def select_daily_candidates(
                 "visualizable": 3,
                 "source_quality": 3,
                 "explainable": 4,
+                "domain_relevance": 5 if hypothesis.channel == "MARKET" else 2,
+                "active_topic_relevance": 5 if hypothesis.channel == "MARKET" else 1,
+                "user_research_relevance": 5 if hypothesis.channel == "MARKET" else 1,
+                "information_gain": 4,
+                "specific_takeaway_strength": 4,
+                "methodological_value": 3,
+                "evidence_quality": 2,
+                "source_depth": 2,
+                "topic_diversity": 1,
             }
         )
         candidates.append(
@@ -264,6 +281,14 @@ def select_daily_candidates(
                     "channel": hypothesis.channel,
                     "disposition": "REQUEST_DATA",
                     "status": f"{hypothesis.maturity} / {hypothesis.status}",
+                    "condition": hypothesis.condition,
+                    "outcome": hypothesis.outcome,
+                    "universe": hypothesis.universe,
+                    "horizon": hypothesis.horizon,
+                    "falsification_criterion": hypothesis.falsification_criterion,
+                    "topic_id": topic_by_title.get(
+                        (hypothesis.statement or "").strip().rstrip(".")
+                    ),
                 },
                 publication_value=value,
             )
@@ -383,6 +408,16 @@ def select_daily_candidates(
                     "title": paper.title,
                     "url": paper.canonical_url or "",
                     "authors": list(paper.authors or [])[:4],
+                    "abstract": str((paper.raw_metadata or {}).get("abstract", "")),
+                    "raw_text": (paper.raw_text or "")[:12000],
+                    "evidence_depth": (
+                        "FULL_TEXT"
+                        if paper.raw_text
+                        else "ABSTRACT"
+                        if (paper.raw_metadata or {}).get("abstract")
+                        else "METADATA"
+                    ),
+                    "lineage": "SOURCE_LEVEL_NO_TOPIC_BRIEF",
                 },
                 publication_value=value,
             )
@@ -690,26 +725,41 @@ def generate_public_copy(
     elif category == PAPER_EXPLAINER:
         url = evidence.get("url") or ""
         authors = ", ".join(evidence.get("authors") or []) or "unknown authors"
-        body = (
-            f"Reading: {title}\n\n"
-            f"{summary or 'A newly retrieved academic work in quantitative research.'}\n\n"
-            f"Interpretation: paper summary derived from archived metadata; the work "
-            f"is presented for research context, not as a validated result.\n\n"
-            f"Limitation: we summarize from archived content and provenance; "
-            f"read the original before relying on any claim.\n\n"
-            f"Source: {authors} — {evidence.get('source_name') or 'academic source'}"
-            + (f" ({url})" if url else "")
-        )
+        source = str(evidence.get("raw_text") or evidence.get("abstract") or "")
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", source) if s.strip()]
+        if not sentences:
+            body = (
+                f"Reading: {title}\n\n{summary}\n\n"
+                "Limitation: metadata-only source; no substantive claim is available.\n\n"
+                "Interpretation: paper summary is provided for research context only.\n\n"
+                "Takeaway: read the original before relying on this paper.\n\n"
+                f"Source: {authors} — {evidence.get('source_name') or 'academic source'}"
+                + (f" ({url})" if url else "")
+            )
+        else:
+            body = (
+                f"Reading: {title}\n\n"
+                f"Question: {sentences[0]}\n\n"
+                f"Method: {sentences[1] if len(sentences) > 1 else sentences[0]}\n\n"
+                f"Result: {sentences[2] if len(sentences) > 2 else sentences[-1]}\n\n"
+                "Limitation: the source content is bounded and observational; this is not a trading signal.\n\n"
+                f"Takeaway: use the reported method and result as a testable research input, not a standalone strategy.\n\n"
+                f"Source: {authors} — {evidence.get('source_name') or 'academic source'}"
+                + (f" ({url})" if url else "")
+            )
     elif category in {REQUEST_DATA_FINDING, HYPOTHESIS_EXPLAINER}:
         body = (
             f"A question worth testing: {title}\n\n"
-            f"What we observed: {summary}\n\n"
+            f"Observed setup: {evidence.get('condition') or summary}\n"
+            f"Outcome of interest: {evidence.get('outcome') or 'subsequent returns'}\n"
+            f"Universe: {evidence.get('universe') or 'the persisted research universe'}\n"
+            f"Horizon: {evidence.get('horizon') or 'as specified by the hypothesis'}\n\n"
             "Why it matters: this is a concrete research question, not a claim that "
             "the relationship is real. Critics requested additional independent "
             "evidence or methodological definition before any test; the evidence is not "
             "sufficient yet.\n\n"
-            "Limitation: the current evidence is unvalidated and may be single-channel "
-            "or metadata-only; this is not a trading signal.\n\n"
+            f"What would falsify it: {evidence.get('falsification_criterion') or 'the prespecified falsification criterion'}\n\n"
+            "Limitation: this remains an unvalidated hypothesis and is not a trading signal.\n\n"
             "Source: Quant Research Radar research registry."
         )
     elif category == RESEARCH_PROCESS_NOTE:
@@ -756,11 +806,126 @@ def generate_public_copy(
             f"sample covers roughly seven months of hourly data.\n\n"
             f"Source: Quant Research Radar event study on Hyperliquid funding data."
         )
+    if (
+        "Takeaway:" not in body
+        and "Why it matters:" not in body
+        and "Core evidence:" not in body
+    ):
+        body += "\n\nTakeaway: this is bounded research context, not a trading signal."
     if language == "CHINESE":
         body = _chinese_fallback(candidate, body)
     elif language == "BILINGUAL":
         body = body + "\n\n---\n\n" + _chinese_fallback(candidate, body)
     return scrub_privacy(body)
+
+
+def _evidence_depth(evidence: dict[str, Any]) -> str:
+    if evidence.get("evidence_depth") in {"ABSTRACT", "FULL_TEXT"}:
+        return str(evidence["evidence_depth"])
+    if evidence.get("raw_text"):
+        return "FULL_TEXT"
+    if evidence.get("abstract"):
+        return "ABSTRACT"
+    return "METADATA"
+
+
+def substantive_content_verdict(candidate: PublicationCandidate) -> dict[str, Any]:
+    """Fail closed when a paper has no bounded content for a useful explainer."""
+    if candidate.category != PAPER_EXPLAINER:
+        return {"status": "PASS", "code": None, "reason": "not a paper explainer"}
+    evidence = candidate.evidence or {}
+    depth = _evidence_depth(evidence)
+    content = str(evidence.get("raw_text") or evidence.get("abstract") or "").strip()
+    if not evidence.get("source_item_id") or not evidence.get("url"):
+        return {
+            "status": "FAIL",
+            "code": "SOURCE_VERIFICATION_FAILED",
+            "reason": "paper lacks a persisted source identity and URL",
+            "evidence_depth": depth,
+        }
+    if depth == "METADATA" or len(content) < 80:
+        return {
+            "status": "FAIL",
+            "code": "SOURCE_DEPTH_TOO_SHALLOW",
+            "reason": "paper has metadata but no bounded abstract or full text",
+            "evidence_depth": depth,
+        }
+    terms = sum(
+        term in content.lower()
+        for term in ("method", "using", "find", "result", "associated", "limit", "data")
+    )
+    if terms < 2:
+        return {
+            "status": "FAIL",
+            "code": "INSUFFICIENT_SUBSTANCE",
+            "reason": "paper content lacks question/method/result substance",
+            "evidence_depth": depth,
+        }
+    return {
+        "status": "PASS",
+        "code": None,
+        "reason": "bounded source content supports an explainer",
+        "evidence_depth": depth,
+    }
+
+
+def copy_quality_verdict(
+    candidate: PublicationCandidate, text: str, *, content_format: str | None = None
+) -> dict[str, Any]:
+    lowered = text.lower()
+    generic = candidate.category == PAPER_EXPLAINER and (
+        "read the original" in lowered
+        or "a paper exists" in lowered
+        or "metadata" in lowered
+    )
+    useful = any(
+        label in lowered for label in ("takeaway:", "why it matters:", "core evidence:")
+    )
+    if not text.strip() or generic or not useful:
+        return {
+            "status": "FAIL",
+            "code": "READER_USEFULNESS_FAILED",
+            "reason": "copy lacks a concrete reader takeaway",
+        }
+    selected = content_format or select_content_format(text)
+    if selected == "THREAD" and text.count("\n\n") < 3:
+        return {
+            "status": "FAIL",
+            "code": "FORMAT_MISMATCH",
+            "reason": "thread requires multiple connected substantive points",
+        }
+    return {
+        "status": "PASS",
+        "code": None,
+        "reason": "copy gives a concrete, bounded reader takeaway",
+        "reader_usefulness": "PASS",
+        "format": selected,
+    }
+
+
+def select_content_format(text: str) -> str:
+    paragraphs = [p for p in text.split("\n\n") if p.strip()]
+    if len(text) <= 280 and len(paragraphs) <= 2:
+        return "SHORT_POST"
+    if (
+        len(paragraphs) >= 6
+        and sum(
+            p.startswith(("Question:", "Method:", "Result:", "Limitation:"))
+            for p in paragraphs
+        )
+        >= 3
+    ):
+        return "THREAD"
+    return "STANDARD_POST"
+
+
+def verification_verdict(
+    claims: list[dict[str, Any]], *, reason: str | None = None
+) -> dict[str, Any]:
+    """A reason and PASS are mutually exclusive at the verification boundary."""
+    if reason or any(not c.get("supported", True) for c in claims):
+        return {"status": "FAIL", "reason": reason or "unsupported claim"}
+    return {"status": "PASS", "claims": claims}
 
 
 def _chinese_fallback(candidate: PublicationCandidate, english_body: str) -> str:
@@ -869,18 +1034,29 @@ def create_draft(
             or prior.title
         )
         if prior_id == object_id:
+            candidate.id = prior.id
+            prior.title = candidate.title
+            prior.summary = candidate.summary
+            prior.evidence = candidate.evidence
+            prior.publication_value = candidate.publication_value
             candidate = prior
             break
     if candidate.id is None:
         session.add(candidate)
         session.flush()
     policy = classify_policy(candidate)
+    substance = substantive_content_verdict(candidate)
+    if substance["status"] == "FAIL":
+        return None, substance["code"] + ": " + substance["reason"]
     text = generate_public_copy(candidate, empirical=empirical, language=language)
     verdict = verify_claims(
         text, empirical=empirical, structured_numbers=structured_numbers
     )
     if verdict.blocked:
         return None, verdict.reason
+    copy_quality = copy_quality_verdict(candidate, text)
+    if copy_quality["status"] == "FAIL":
+        return None, copy_quality["code"] + ": " + copy_quality["reason"]
     if policy not in PUBLISHABLE:
         return None, f"policy {policy} does not permit publication"
     claims = verdict.claims or [
@@ -926,6 +1102,62 @@ def create_draft(
     session.add(draft)
     session.commit()
     return draft, None
+
+
+def evaluate_editorial_candidates(
+    session: Session,
+    candidates: list[PublicationCandidate],
+    *,
+    language: str = "ENGLISH",
+) -> dict[str, Any]:
+    """Try ranked candidates in order; retain every failed attempt."""
+
+    def rank(candidate: PublicationCandidate) -> tuple[Any, ...]:
+        components = (candidate.publication_value or {}).get("components", {})
+        return (
+            -int((candidate.publication_value or {}).get("total", 0)),
+            -int(components.get("active_topic_relevance", 0)),
+            -int(components.get("source_depth", 0)),
+            candidate.title.lower(),
+        )
+
+    history: list[dict[str, Any]] = []
+    ordered = sorted(candidates, key=rank)
+    for position, candidate in enumerate(ordered, 1):
+        draft, rejection = create_draft(
+            session,
+            candidate,
+            empirical=dict(candidate.evidence or {}),
+            structured_numbers={},
+            language=language,
+        )
+        evidence = candidate.evidence or {}
+        components = (candidate.publication_value or {}).get("components", {})
+        entry = {
+            "candidate_id": str(candidate.id) if candidate.id else None,
+            "title": candidate.title,
+            "category": candidate.category,
+            "rank": position,
+            "score": (candidate.publication_value or {}).get("total", 0),
+            "format": select_content_format(draft.text) if draft else None,
+            "evidence_depth": _evidence_depth(evidence),
+            "relevance": components.get("active_topic_relevance", 0),
+            "draft_status": "PASS" if draft else "REJECTED",
+            "verification": {
+                "status": "PASS" if draft else "FAIL",
+                "reason": rejection,
+            },
+            "copy_quality": {
+                "status": "PASS" if draft else "FAIL",
+                "reason": rejection,
+            },
+            "rejection_code": rejection.split(":", 1)[0] if rejection else None,
+            "reason": rejection,
+        }
+        history.append(entry)
+        if draft:
+            return {"selected": candidate, "draft": draft, "rejections": history}
+    return {"selected": None, "draft": None, "rejections": history}
 
 
 def register_publication(

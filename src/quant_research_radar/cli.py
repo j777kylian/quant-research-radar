@@ -336,9 +336,7 @@ def main() -> None:
                     DailySocialEditorialPackage.logical_date == parsed_date
                 )
             )
-        if args.action in {"daily", "evaluate"} and (
-            package is None or package.recommendation not in {"PUBLISH", "SKIP"}
-        ):
+        if args.action in {"daily", "evaluate"}:
             daily = session.scalar(
                 select(DailyRun).where(
                     DailyRun.logical_date == date.fromisoformat(target_date)
@@ -349,8 +347,8 @@ def main() -> None:
             from .publication_ops import _persist_social_package
             from .publishing import (
                 classify_policy,
+                evaluate_editorial_candidates,
                 select_daily_candidates,
-                select_editorial_daily_candidate,
             )
             from .synthesis import synthesize_daily_topics
 
@@ -358,56 +356,63 @@ def main() -> None:
             candidates = select_daily_candidates(
                 session, daily_run_id=str(daily.id), logical_date=target_date
             )
-            selected, editorial = select_editorial_daily_candidate(candidates)
-            draft = None
-            rejection = "no publishable candidate"
-            if selected is not None:
-                from .publishing import create_draft
-
-                empirical = dict(selected.evidence)
-                has_study = bool(empirical.get("event_study_result_id"))
-                if has_study:
-                    empirical.setdefault("disposition", "INCONCLUSIVE")
-                draft, rejection_value = create_draft(
-                    session,
-                    selected,
-                    empirical=empirical,
-                    structured_numbers={"0": 0.0} if has_study else {},
-                    language=settings.publication_language,
-                )
-                rejection = rejection_value or "copy verification failed"
-            recommendation = (
-                "PUBLISH" if draft is not None and draft.text.strip() else "SKIP"
+            evaluation = evaluate_editorial_candidates(
+                session, candidates, language=settings.publication_language
             )
+            selected = evaluation["selected"]
+            draft = evaluation["draft"]
+            rejection_history = evaluation["rejections"]
+            recommendation = (
+                "PUBLISH" if selected is not None and draft is not None else "SKIP"
+            )
+            reason = (
+                "first ranked candidate passing all editorial gates"
+                if recommendation == "PUBLISH"
+                else "all candidates failed editorial gates"
+            )
+            metadata = {
+                "policy": classify_policy(selected) if selected else None,
+                "verification": {
+                    "status": "PASS" if draft else "FAIL",
+                    "reason": None
+                    if draft
+                    else "editorial gates rejected all candidates",
+                },
+                "copy_quality": {
+                    "status": "PASS" if draft else "FAIL",
+                    "reason": None
+                    if draft
+                    else "editorial gates rejected all candidates",
+                },
+                "draft_id": str(draft.id) if draft else None,
+                "source_bundle": draft.source_bundle if draft else {},
+                "score": selected.publication_value if selected else None,
+                "selected": {
+                    "id": str(selected.id),
+                    "title": selected.title,
+                    "category": selected.category,
+                    "topic_id": (selected.evidence or {}).get("topic_id"),
+                }
+                if selected
+                else {},
+                "source_ids": [
+                    str(v)
+                    for k, v in (draft.source_bundle if draft else {}).items()
+                    if k.endswith("_id") and v
+                ],
+                "visual_ids": list(draft.visual_ids) if draft else [],
+                "rejection_history": rejection_history,
+            }
             _persist_social_package(
                 session,
                 daily,
                 candidates,
                 selected,
                 recommendation,
-                editorial.get("reason", rejection or "historical evaluation"),
+                reason,
                 Path(args.output_root),
                 draft.text if draft else None,
-                {
-                    "policy": classify_policy(selected) if selected else None,
-                    "verification": {
-                        "status": "PASS" if draft else "FAIL",
-                        "reason": rejection,
-                    },
-                    "copy_quality": {"status": "PASS" if draft else "FAIL"},
-                    "draft_id": str(draft.id) if draft else None,
-                    "source_bundle": draft.source_bundle if draft else {},
-                    "score": selected.publication_value if selected else None,
-                    "selected": {"id": str(selected.id), "title": selected.title}
-                    if selected
-                    else {},
-                    "source_ids": [
-                        str(v)
-                        for k, v in (draft.source_bundle if draft else {}).items()
-                        if k.endswith("_id") and v
-                    ],
-                    "visual_ids": list(draft.visual_ids) if draft else [],
-                },
+                metadata,
             )
             package = session.scalar(
                 select(DailySocialEditorialPackage).where(
@@ -423,7 +428,10 @@ def main() -> None:
             "format": package.content_format,
             "reason": package.selection_reason,
             "candidates": package.candidates,
+            "rejections": (package.source_bundle or {}).get("rejection_history", []),
             "draft": package.draft_text,
+            "sources": package.source_bundle,
+            "visuals": (package.source_bundle or {}).get("visual_ids", []),
             "path": package.output_path,
         }
         if args.json:
