@@ -320,11 +320,14 @@ def main() -> None:
         target_date = args.date or args.value
         if package is None and not target_date:
             parser.error("publish daily/show/evaluate requires --date or value")
+        try:
+            parsed_date = date.fromisoformat(target_date) if target_date else None
+        except ValueError:
+            parser.error("date must use YYYY-MM-DD")
         if package is None:
             package = session.scalar(
                 select(DailySocialEditorialPackage).where(
-                    DailySocialEditorialPackage.logical_date
-                    == date.fromisoformat(target_date)
+                    DailySocialEditorialPackage.logical_date == parsed_date
                 )
             )
         if args.action == "evaluate" and package is None:

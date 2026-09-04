@@ -21,6 +21,7 @@ from quant_research_radar.delivery import (
     send_discord,
     send_email,
 )
+from quant_research_radar.publication_ops import _persist_social_package
 from quant_research_radar.publishing import (
     PRIVATE,
     PUBLIC,
@@ -740,3 +741,18 @@ def test_publication_requires_completed_daily_run() -> None:
     running.status = "SUCCESS"
     s.commit()
     assert run_ids_complete(s, str(running.id)) is True
+
+
+def test_social_package_failure_isolated_from_research(tmp_path: Path) -> None:
+    s = _session()
+    daily = DailyRun(
+        logical_date=__import__("datetime").date(2026, 9, 3),
+        status="SUCCESS",
+        code_sha="s",
+    )
+    s.add(daily)
+    s.commit()
+    blocked = tmp_path / "not-a-directory"
+    blocked.write_text("x", encoding="utf-8")
+    assert not _persist_social_package(s, daily, [], None, "SKIP", "test", blocked)
+    assert s.get(DailyRun, daily.id).status == "SUCCESS"

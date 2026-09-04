@@ -69,7 +69,37 @@ def test_evidence_depth_never_infers_method_from_metadata() -> None:
     assert evidence_depth(full) == DEPTH_FULL_TEXT
 
 
-def test_topic_synthesis_is_stable_and_does_not_mutate_science() -> None:
+def test_topic_brief_depth_matches_persisted_sources(monkeypatch) -> None:
+    s = _session()
+    daily = _daily()
+    s.add(daily)
+    s.commit()
+    monkeypatch.setattr(
+        "quant_research_radar.synthesis.build_daily_topic_packet",
+        lambda session, record: {
+            "logical_date": record.logical_date.isoformat(),
+            "run_id": str(record.id),
+            "status": record.status,
+            "source_items": [
+                {
+                    "source_item_id": "m",
+                    "url": "https://example.test",
+                    "evidence_depth": DEPTH_METADATA_ONLY,
+                }
+            ],
+            "findings": [{"title": "Metadata finding", "question": "What changed?"}],
+            "critic_reasons": {},
+            "research": {},
+            "knowledge": {},
+            "market": {},
+            "inputs": {},
+            "provenance": {"code_sha": record.code_sha},
+        },
+    )
+    topic = synthesize_daily_topics(s, daily.id)[0]
+    assert topic.brief["evidence_depth"] == DEPTH_METADATA_ONLY
+    assert topic.brief["sources"][0]["source_item_id"] == "m"
+
     s = _session()
     daily = _daily()
     s.add(daily)

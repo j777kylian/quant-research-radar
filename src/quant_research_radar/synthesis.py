@@ -117,6 +117,18 @@ def synthesize_daily_topics(session: Session, daily_run_id: Any) -> list[TopicBr
         )
         title = str(finding.get("title") or f"Research topic {index}")
         endpoints = finding.get("horizon_endpoints") or []
+        depth_rank = {
+            DEPTH_METADATA_ONLY: 0,
+            DEPTH_STRUCTURED_EXCERPT: 1,
+            DEPTH_ABSTRACT: 2,
+            DEPTH_FULL_TEXT: 3,
+        }
+        source_items = packet.get("source_items", [])
+        brief_depth = min(
+            (item.get("evidence_depth", DEPTH_METADATA_ONLY) for item in source_items),
+            key=lambda depth: depth_rank.get(depth, 0),
+            default=DEPTH_METADATA_ONLY,
+        )
         brief = {
             "background": "Prior knowledge and today's persisted evidence motivate this question; no unsupported market theory is added.",
             "research_question": finding.get("question") or title,
@@ -137,8 +149,11 @@ def synthesize_daily_topics(session: Session, daily_run_id: Any) -> list[TopicBr
             "scientific_status": finding.get("status"),
             "recommendation": finding.get("next") or "ACCUMULATE_EVIDENCE",
             "next_action": finding.get("next"),
-            "sources": [],
-            "evidence_depth": "STRUCTURED_EXCERPT",
+            "sources": [
+                {"source_item_id": item.get("source_item_id"), "url": item.get("url")}
+                for item in source_items
+            ],
+            "evidence_depth": brief_depth,
             "public_eligibility": True,
             "research_priority": None,
         }

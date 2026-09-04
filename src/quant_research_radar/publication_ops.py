@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from .config import Settings
@@ -41,7 +42,7 @@ from .publishing import (
 from .x_client import publish_draft, x_mode
 
 
-def _persist_social_package(
+def _persist_social_package_impl(
     session: Session,
     daily: DailyRun,
     candidates: list[Any],
@@ -110,6 +111,34 @@ def _persist_social_package(
         existing.draft_text = draft_text
         existing.output_path = str(package_dir)
     session.commit()
+
+
+def _persist_social_package(
+    session: Session,
+    daily: DailyRun,
+    candidates: list[Any],
+    selected: Any | None,
+    recommendation: str,
+    reason: str,
+    output_root: Path,
+    draft_text: str | None = None,
+) -> bool:
+    """Best-effort downstream persistence; never changes research outcome."""
+    try:
+        _persist_social_package_impl(
+            session,
+            daily,
+            candidates,
+            selected,
+            recommendation,
+            reason,
+            output_root,
+            draft_text,
+        )
+    except (OSError, SQLAlchemyError):
+        session.rollback()
+        return False
+    return True
 
 
 def _persist_weekly_social_package(
