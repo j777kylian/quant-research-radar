@@ -204,6 +204,14 @@ def main() -> None:
     ops.add_argument("--force", action="store_true")
     ops.add_argument("--now", type=datetime.fromisoformat, default=None)
     ops.add_argument("--date", default=None)
+    publish = sub.add_parser("publish")
+    publish.add_argument(
+        "action", choices=["latest", "list", "show", "daily", "history", "evaluate"]
+    )
+    publish.add_argument("value", nargs="?", default=None)
+    publish.add_argument("--date", default=None)
+    publish.add_argument("--database-url", default=None)
+    publish.add_argument("--output-root", default="outputs/operations")
     event_study = sub.add_parser("event-study")
     event_study.add_argument("action", choices=["run", "list", "show"])
     event_study.add_argument("--database-url", required=True)
@@ -243,6 +251,136 @@ def main() -> None:
     )
     args = parser.parse_args()
     settings = get_settings()
+    if args.command == "publish":
+        from .db import DailyRun, DailySocialEditorialPackage, PublicationDraft
+
+        database_url = args.database_url or settings.database_url
+        migrate_database(database_url)
+        session = make_session_factory(make_engine(database_url))()
+        packages = select(DailySocialEditorialPackage).order_by(
+            DailySocialEditorialPackage.logical_date.desc()
+        )
+        if args.action in {"latest", "list", "history"}:
+            package_rows = session.scalars(packages).all()
+            if args.date:
+                package_rows = [
+                    row
+                    for row in package_rows
+                    if row.logical_date.isoformat() == args.date
+                ]
+            if args.action == "latest":
+                package_rows = package_rows[:1]
+            if args.action == "history":
+                draft_rows = session.scalars(
+                    select(PublicationDraft).order_by(
+                        PublicationDraft.created_at.desc()
+                    )
+                ).all()
+                print(
+                    json.dumps(
+                        [
+                            {
+                                "id": str(row.id),
+                                "created_at": row.created_at,
+                                "text": row.text,
+                            }
+                            for row in draft_rows
+                        ],
+                        default=str,
+                        sort_keys=True,
+                    )
+                )
+            else:
+                print(
+                    json.dumps(
+                        [
+                            {
+                                "id": str(row.id),
+                                "date": row.logical_date,
+                                "recommendation": row.recommendation,
+                                "format": row.content_format,
+                                "selected": row.selected_candidate_id,
+                                "path": row.output_path,
+                            }
+                            for row in package_rows
+                        ],
+                        default=str,
+                        sort_keys=True,
+                    )
+                )
+            return
+        package = None
+        if args.action == "show" and args.value:
+            try:
+                package = session.get(
+                    DailySocialEditorialPackage, uuid.UUID(args.value)
+                )
+            except ValueError:
+                package = None
+        target_date = args.date or args.value
+        if package is None and not target_date:
+            parser.error("publish daily/show/evaluate requires --date or value")
+        if package is None:
+            package = session.scalar(
+                select(DailySocialEditorialPackage).where(
+                    DailySocialEditorialPackage.logical_date
+                    == date.fromisoformat(target_date)
+                )
+            )
+        if args.action == "evaluate" and package is None:
+            daily = session.scalar(
+                select(DailyRun).where(
+                    DailyRun.logical_date == date.fromisoformat(target_date)
+                )
+            )
+            if daily is None or daily.status == "RUNNING":
+                parser.error("completed Daily required for historical evaluation")
+            from .publication_ops import _persist_social_package
+            from .publishing import (
+                select_daily_candidates,
+                select_editorial_daily_candidate,
+            )
+            from .synthesis import synthesize_daily_topics
+
+            synthesize_daily_topics(session, daily.id)
+            candidates = select_daily_candidates(
+                session, daily_run_id=str(daily.id), logical_date=target_date
+            )
+            selected, editorial = select_editorial_daily_candidate(candidates)
+            _persist_social_package(
+                session,
+                daily,
+                candidates,
+                selected,
+                "EVALUATE",
+                editorial.get("reason", "historical evaluation"),
+                Path(args.output_root),
+            )
+            package = session.scalar(
+                select(DailySocialEditorialPackage).where(
+                    DailySocialEditorialPackage.logical_date == daily.logical_date
+                )
+            )
+        if package is None:
+            parser.error("no social package for date")
+        print(
+            json.dumps(
+                {
+                    "id": str(package.id),
+                    "date": package.logical_date,
+                    "recommendation": package.recommendation,
+                    "format": package.content_format,
+                    "reason": package.selection_reason,
+                    "candidates": package.candidates,
+                    "draft": package.draft_text,
+                    "path": package.output_path,
+                },
+                default=str,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
     if args.command == "ops":
         from .operations import (
             OperationsLock,

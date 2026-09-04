@@ -566,6 +566,74 @@ class WeeklyRun(Base):
 # ---------------------------------------------------------------------------
 
 
+class TopicBrief(Base):
+    """Versioned interpretive artifact derived from finalized research state."""
+
+    __tablename__ = "topic_briefs"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_run_id", "topic_id", "topic_version", name="uq_topic_brief_version"
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    topic_id: Mapped[str] = mapped_column(String(200), index=True)
+    topic_version: Mapped[str] = mapped_column(String(30), default="1")
+    logical_date: Mapped[date] = mapped_column(Date, index=True)
+    source_run_id: Mapped[str] = mapped_column(String(64), index=True)
+    source_kind: Mapped[str] = mapped_column(String(20), default="DAILY")
+    human_title: Mapped[str] = mapped_column(String(500))
+    packet: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    brief: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    input_packet_hash: Mapped[str] = mapped_column(String(64))
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    model_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class DailySocialEditorialPackage(Base):
+    """Durable daily editorial evaluation; one package even for SKIP."""
+
+    __tablename__ = "daily_social_packages"
+    __table_args__ = (UniqueConstraint("logical_date", name="uq_social_package_date"),)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    logical_date: Mapped[date] = mapped_column(Date, index=True)
+    source_run_id: Mapped[str] = mapped_column(String(64), index=True)
+    topic_brief_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    candidates: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    selected_candidate_id: Mapped[str | None] = mapped_column(String(64))
+    recommendation: Mapped[str] = mapped_column(String(30), default="SKIP")
+    selection_reason: Mapped[str] = mapped_column(Text, default="")
+    content_format: Mapped[str] = mapped_column(String(30), default="SHORT_POST")
+    draft_text: Mapped[str | None] = mapped_column(Text)
+    source_bundle: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    output_path: Mapped[str | None] = mapped_column(String(1000))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
+class WeeklySocialEditorialPackage(Base):
+    """Durable weekly editorial evaluation."""
+
+    __tablename__ = "weekly_social_packages"
+    __table_args__ = (
+        UniqueConstraint("week_saturday", name="uq_weekly_social_package_date"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    week_saturday: Mapped[date] = mapped_column(Date, index=True)
+    source_run_id: Mapped[str] = mapped_column(String(64), index=True)
+    candidates: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    recommendation: Mapped[str] = mapped_column(String(30), default="SKIP")
+    selection_reason: Mapped[str] = mapped_column(Text, default="")
+    content_format: Mapped[str] = mapped_column(String(30), default="THREAD")
+    draft_text: Mapped[str | None] = mapped_column(Text)
+    output_path: Mapped[str | None] = mapped_column(String(1000))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
 class PublicationCandidate(Base):
     """Something in a completed research cycle worth public evaluation."""
 

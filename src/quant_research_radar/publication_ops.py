@@ -6,8 +6,9 @@ publication failure never degrades research status; retries are idempotent.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -15,10 +16,13 @@ from sqlalchemy.orm import Session
 from .config import Settings
 from .db import (
     DailyRun,
+    DailySocialEditorialPackage,
     DeliveryRecord,
     PublicationDraft,
     PublicationRecord,
+    TopicBrief,
     WeeklyRun,
+    WeeklySocialEditorialPackage,
 )
 from .delivery import (
     daily_digest_text,
@@ -35,6 +39,139 @@ from .publishing import (
     select_weekly_candidates,
 )
 from .x_client import publish_draft, x_mode
+
+
+def _persist_social_package(
+    session: Session,
+    daily: DailyRun,
+    candidates: list[Any],
+    selected: Any | None,
+    recommendation: str,
+    reason: str,
+    output_root: Path,
+    draft_text: str | None = None,
+) -> None:
+    """Persist one deterministic editorial package; never touches science."""
+    existing = session.scalar(
+        select(DailySocialEditorialPackage).where(
+            DailySocialEditorialPackage.logical_date == daily.logical_date
+        )
+    )
+    payload = {
+        "logical_date": daily.logical_date.isoformat(),
+        "source_run_id": str(daily.id),
+        "recommendation": recommendation,
+        "selection_reason": reason,
+        "selected_candidate_id": str(selected.id)
+        if selected is not None and selected.id
+        else None,
+        "candidate_themes": [
+            {"category": c.category, "title": c.title, "score": c.publication_value}
+            for c in candidates
+        ],
+        "topic_brief_ids": [
+            str(t.id)
+            for t in session.scalars(
+                select(TopicBrief).where(TopicBrief.source_run_id == str(daily.id))
+            ).all()
+        ],
+    }
+    package_dir = output_root / "social" / daily.logical_date.isoformat()
+    package_dir.mkdir(parents=True, exist_ok=True)
+    package_path = package_dir / "summary.json"
+    package_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    if draft_text:
+        (package_dir / "draft.md").write_text(draft_text, encoding="utf-8")
+    if existing is None:
+        existing = DailySocialEditorialPackage(
+            logical_date=daily.logical_date,
+            source_run_id=str(daily.id),
+            topic_brief_ids=payload["topic_brief_ids"],
+            candidates=payload["candidate_themes"],
+            selected_candidate_id=payload["selected_candidate_id"],
+            recommendation=recommendation,
+            selection_reason=reason,
+            content_format="THREAD" if len(candidates) > 3 else "SHORT_POST",
+            draft_text=draft_text,
+            source_bundle={},
+            output_path=str(package_dir),
+        )
+        session.add(existing)
+    else:
+        existing.topic_brief_ids = cast(list[str], payload["topic_brief_ids"])
+        existing.candidates = cast(list[dict[str, Any]], payload["candidate_themes"])
+        existing.selected_candidate_id = cast(
+            str | None, payload["selected_candidate_id"]
+        )
+        existing.recommendation = recommendation
+        existing.selection_reason = reason
+        existing.draft_text = draft_text
+        existing.output_path = str(package_dir)
+    session.commit()
+
+
+def _persist_weekly_social_package(
+    session: Session,
+    weekly: WeeklyRun,
+    candidates: list[Any],
+    recommendation: str,
+    reason: str,
+    output_root: Path,
+    draft_text: str | None = None,
+) -> None:
+    package_dir = output_root / "social" / f"weekly-{weekly.week_saturday.isoformat()}"
+    package_dir.mkdir(parents=True, exist_ok=True)
+    (package_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "week_saturday": weekly.week_saturday.isoformat(),
+                "source_run_id": str(weekly.id),
+                "recommendation": recommendation,
+                "reason": reason,
+                "candidates": [
+                    {
+                        "category": c.category,
+                        "title": c.title,
+                        "score": c.publication_value,
+                    }
+                    for c in candidates
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    existing = session.scalar(
+        select(WeeklySocialEditorialPackage).where(
+            WeeklySocialEditorialPackage.week_saturday == weekly.week_saturday
+        )
+    )
+    values = dict(
+        candidates=[
+            {"category": c.category, "title": c.title, "score": c.publication_value}
+            for c in candidates
+        ],
+        recommendation=recommendation,
+        selection_reason=reason,
+        draft_text=draft_text,
+        output_path=str(package_dir),
+    )
+    if existing is None:
+        session.add(
+            WeeklySocialEditorialPackage(
+                week_saturday=weekly.week_saturday,
+                source_run_id=str(weekly.id),
+                content_format="THREAD",
+                **values,
+            )
+        )
+    else:
+        for key, value in values.items():
+            setattr(existing, key, value)
+    session.commit()
 
 
 def after_daily(
@@ -109,7 +246,21 @@ def after_daily(
             "status": "SKIPPED",
             "reason": "mode disabled or research incomplete",
         }
+        if record is not None and research_complete:
+            _persist_social_package(
+                session,
+                record,
+                [],
+                None,
+                "SKIP",
+                "publication mode disabled",
+                output_root,
+            )
         return result
+    assert record is not None
+    from .synthesis import synthesize_daily_topics
+
+    synthesize_daily_topics(session, record.id)
     candidates = select_daily_candidates(
         session, daily_run_id=daily_run_id, logical_date=logical_date
     )
@@ -119,6 +270,15 @@ def after_daily(
             "reason": "no eligible candidate",
             "pool": [],
         }
+        _persist_social_package(
+            session,
+            record,
+            candidates,
+            None,
+            "SKIP",
+            "No sufficiently informative, source-grounded, non-duplicative research story today.",
+            output_root,
+        )
         return result
     selected, editorial = select_editorial_daily_candidate(candidates)
     if selected is None:
@@ -127,6 +287,15 @@ def after_daily(
             "reason": editorial.get("reason", "no publishable candidate"),
             "pool": [c.category for c in candidates],
         }
+        _persist_social_package(
+            session,
+            record,
+            candidates,
+            None,
+            "SKIP",
+            editorial.get("reason", "no publishable candidate"),
+            output_root,
+        )
         return result
     empirical = dict(selected.evidence)
     # Study-shape gates (disposition + structured numbers) apply only to
@@ -149,6 +318,15 @@ def after_daily(
             "reason": rejection,
             "category": selected.category,
         }
+        _persist_social_package(
+            session,
+            record,
+            candidates,
+            selected,
+            "SKIP",
+            rejection or "copy verification failed",
+            output_root,
+        )
         return result
     visual_path: Path | None = None
     if has_study:
@@ -193,6 +371,16 @@ def after_daily(
             "editorial": editorial,
             "pool": [c.category for c in candidates],
         }
+    _persist_social_package(
+        session,
+        record,
+        candidates,
+        selected,
+        result["publication"]["status"],
+        editorial.get("reason", "highest publication value"),
+        output_root,
+        draft.text,
+    )
     return result
 
 
@@ -251,10 +439,15 @@ def after_weekly(
 
     if settings.publication_mode == "DISABLED" or not research_complete:
         result["publication"] = {"status": "SKIPPED"}
+        if record is not None and research_complete:
+            _persist_weekly_social_package(
+                session, record, [], "SKIP", "publication mode disabled", output_root
+            )
         return result
-    for candidate in select_weekly_candidates(
+    weekly_candidates = select_weekly_candidates(
         session, weekly_run_id=weekly_run_id, week_saturday=week_saturday
-    ):
+    )
+    for candidate in weekly_candidates:
         draft, rejection = create_draft(
             session,
             candidate,
@@ -269,6 +462,15 @@ def after_weekly(
             "status": "DRAFT_ONLY" if x_mode(settings) != "AUTO_PUBLISH" else "GATED",
             "draft_id": str(draft.id),
         }
+    if record is not None:
+        _persist_weekly_social_package(
+            session,
+            record,
+            weekly_candidates,
+            result["publication"].get("status", "SKIP"),
+            "weekly research package generated",
+            output_root,
+        )
     return result
 
 

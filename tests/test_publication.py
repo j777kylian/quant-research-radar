@@ -12,6 +12,7 @@ from quant_research_radar.db import (
     Base,
     ChannelHypothesis,
     DailyRun,
+    DailySocialEditorialPackage,
     PublicationCandidate,
     PublicationDraft,
 )
@@ -661,6 +662,9 @@ def test_after_daily_paper_day_drafts_instead_of_rejecting(tmp_path: Path) -> No
     assert pub.get("category") == "PAPER_EXPLAINER"
     draft = s.scalars(select(PublicationDraft)).one()
     assert "On the persistence of funding regimes" in draft.text
+    package = s.scalars(select(DailySocialEditorialPackage)).one()
+    assert package.recommendation == "DRAFT_ONLY"
+    assert package.output_path is not None
 
 
 def test_paper_explainer_copy_keeps_source_lineage() -> None:

@@ -340,7 +340,21 @@ def select_daily_candidates(
                 publication_value=value,
             )
         )
-    return candidates
+    # Identity-level dedup precedes copy rendering. Same scientific object and
+    # category in one Daily is one editorial angle even if title wording shifts.
+    unique: dict[tuple[str, str, str], PublicationCandidate] = {}
+    for candidate in candidates:
+        evidence = candidate.evidence or {}
+        object_id = str(
+            evidence.get("hypothesis_id")
+            or evidence.get("source_item_id")
+            or evidence.get("event_study_result_id")
+            or candidate.title
+        )
+        unique.setdefault(
+            (candidate.source_run_id, candidate.category, object_id), candidate
+        )
+    return list(unique.values())
 
 
 def select_editorial_daily_candidate(
@@ -742,6 +756,27 @@ def create_draft(
     visual_ids: list[str] | None = None,
 ) -> tuple[PublicationDraft | None, str | None]:
     """Build the draft, verify claims, persist. Returns (draft, rejection_reason)."""
+    object_id = str(
+        (candidate.evidence or {}).get("hypothesis_id")
+        or (candidate.evidence or {}).get("source_item_id")
+        or (candidate.evidence or {}).get("event_study_result_id")
+        or candidate.title
+    )
+    for prior in session.scalars(
+        select(PublicationCandidate).where(
+            PublicationCandidate.source_run_id == candidate.source_run_id,
+            PublicationCandidate.category == candidate.category,
+        )
+    ).all():
+        prior_id = str(
+            (prior.evidence or {}).get("hypothesis_id")
+            or (prior.evidence or {}).get("source_item_id")
+            or (prior.evidence or {}).get("event_study_result_id")
+            or prior.title
+        )
+        if prior_id == object_id:
+            candidate = prior
+            break
     if candidate.id is None:
         session.add(candidate)
         session.flush()

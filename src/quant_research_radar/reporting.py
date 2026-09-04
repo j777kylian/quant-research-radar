@@ -351,12 +351,13 @@ def _humanize(
         ).all()
         items = []
         for item in rows[:5]:
-            body_present = bool((item.raw_text or "").strip())
+            from .synthesis import evidence_depth
+
+            depth = evidence_depth(item)
             summary = (
-                "Metadata collected; insufficient archived content for a "
-                "reliable result summary."
-                if not body_present
-                else "Content archived and available for reading."
+                "Only metadata is available; methodology and results cannot be reliably summarized."
+                if depth == "METADATA_ONLY"
+                else f"Persisted content depth: {depth}; summary is bounded to archived material."
             )
             items.append(
                 {
@@ -366,6 +367,7 @@ def _humanize(
                     "published_at": (
                         item.published_at.isoformat() if item.published_at else None
                     ),
+                    "evidence_depth": depth,
                     "content_summary": summary,
                 }
             )
@@ -520,15 +522,21 @@ def render_daily_markdown(summary: dict[str, Any]) -> str:
         )
     lines += [
         "",
-        "## Important Findings",
+        "## Topic Briefs",
     ]
     if findings:
         for finding in findings[:5]:
-            lines.append(f"- **{finding.get('title')}**")
-            lines.append(f"  - Question: {finding.get('question')}")
+            lines.append(f"### {finding.get('title')}")
+            lines.append(f"- **Research question:** {finding.get('question')}")
             lines.append(
-                f"  - Channel: {finding.get('channel')} | novelty: "
-                f"{finding.get('novelty')} | status: {finding.get('status')}"
+                f"- **Today's evidence:** {finding.get('channel')} channel; "
+                f"novelty {finding.get('novelty')} | scientific status {finding.get('status')}"
+            )
+            lines.append(
+                "- **Method:** Persisted structured observation/hypothesis; no new empirical result is claimed here."
+            )
+            lines.append(
+                "- **Result:** The hypothesis is retained for research; it is not evidence of causality or a trading signal."
             )
             endpoints = finding.get("horizon_endpoints") or []
             if endpoints:
