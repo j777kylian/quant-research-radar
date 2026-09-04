@@ -204,23 +204,80 @@ def send_discord(
 
 
 def daily_digest_text(summary: dict[str, Any], report_path: str | None) -> str:
-    market = summary.get("market", {})
+    """Daily Email digest: Human Brief content (research first, ops second)."""
     lines = [
         f"Quant Research Radar — Daily {summary.get('logical_date', '')}",
         f"Status: {summary.get('status', 'UNKNOWN')}",
-        f"Market: {market.get('status', 'n/a')} (inserted={market.get('inserted', 0)})",
-        f"Analysis: {summary.get('intelligence_technical_status', 'n/a')}",
     ]
-    if summary.get("failure_reasons"):
-        lines.append(f"Failures: {'; '.join(summary['failure_reasons'][:3])}")
+    findings = summary.get("findings") or []
+    if findings:
+        lines.append("Today's important research:")
+        for finding in findings[:3]:
+            lines.append(f"  - {finding.get('title')}")
+            question = finding.get("question")
+            if question:
+                lines.append(f"      Q: {question}")
+            novelty = finding.get("novelty")
+            if novelty:
+                lines.append(f"      {novelty} | {finding.get('channel', '')}")
+            endpoints = finding.get("horizon_endpoints") or []
+            if endpoints:
+                fits = ", ".join(
+                    f"{e.get('value')}{e.get('unit')} → {e.get('fit')}"
+                    for e in endpoints
+                )
+                lines.append(f"      Horizons: {fits}")
+    else:
+        lines.append("No new hypothesis family or notable research input today.")
+    inputs = summary.get("inputs") or {}
+    academic = inputs.get("academic") or []
+    if academic:
+        lines.append("Academic inputs:")
+        for item in academic[:3]:
+            lines.append(f"  - {item.get('title')} ({item.get('source')})")
+    if summary.get("critic_reasons"):
+        lines.append(
+            "Critics requested more data (methodology not yet test-ready): "
+            f"{len(summary['critic_reasons'])} of 3 critics asked for evidence."
+        )
     lines.append(
         "No high-priority low-frequency research candidate today."
         if not summary.get("high_fit_count")
-        else f"High-fit low-frequency candidates: {summary['high_fit_count']}"
+        else f"Visible 1d-30d candidates: {summary['high_fit_count']}"
     )
+    conclusion = summary.get("conclusion")
+    if conclusion:
+        lines.append(f"Conclusion: {conclusion}")
+    if summary.get("failure_reasons"):
+        lines.append(
+            f"Degradations: {'; '.join(str(x) for x in summary['failure_reasons'][:3])}"
+        )
     if report_path:
         lines.append(f"Full report: {os.path.basename(report_path)}")
     return "\n".join(lines)
+
+
+def daily_discord_text(summary: dict[str, Any]) -> str:
+    """Compact Discord summary; never the full brief."""
+    findings = summary.get("findings") or []
+    parts = [
+        f"Daily {summary.get('logical_date', '')}: {summary.get('status', 'UNKNOWN')}",
+    ]
+    new_count = summary.get("new_count")
+    recurrent = summary.get("recurrent_count")
+    if new_count is not None:
+        parts.append(f"{new_count} new / {recurrent or 0} recurrent families.")
+    if findings:
+        top = findings[0]
+        parts.append(f"Most interesting: {top.get('title')} — more evidence required.")
+    elif summary.get("high_fit_count"):
+        parts.append(f"{summary['high_fit_count']} visible 1d-30d candidate(s).")
+    else:
+        parts.append("No high-fit candidate today.")
+    critic_reasons = summary.get("critic_reasons")
+    if critic_reasons:
+        parts.append(f"{len(critic_reasons)} critics requested more data.")
+    return "\n".join(part for part in parts if part)
 
 
 def weekly_digest_text(summary: dict[str, Any], report_path: str | None) -> str:

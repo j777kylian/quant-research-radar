@@ -30,6 +30,7 @@ from quant_research_radar.publishing import (
     render_effect_chart,
     scrub_privacy,
     select_daily_candidates,
+    select_editorial_daily_candidate,
     verify_claims,
 )
 from quant_research_radar.x_client import (
@@ -498,6 +499,120 @@ def test_zero_post_day_valid() -> None:
         s, daily_run_id=str(uuid.uuid4()), logical_date="2099-01-01"
     )
     assert candidates == []  # no empirical result before that date
+
+
+def test_request_data_hypothesis_can_be_editorial_candidate() -> None:
+    """A REQUEST_DATA finding (no edge) is first-class public content."""
+    from datetime import UTC, datetime
+
+    from quant_research_radar.db import ChannelHypothesis
+
+    s = _session()
+    s.add(
+        ChannelHypothesis(
+            channel="MARKET",
+            statement="Extreme SOL funding changes subsequent return distribution",
+            condition="SOL funding percentile >= 90",
+            outcome="subsequent 4h, 24h return distribution",
+            universe="SOL perpetual",
+            horizon="4h and 24h",
+            falsification_criterion="criterion",
+            maturity="H1_STATISTICAL_HYPOTHESIS",
+            status="DISCOVERED",
+            fingerprint="market|sol-family",
+            analysis_mode="PRODUCTION_LIVE",
+            availability_basis="RECEIPT_TIME",
+            as_of=datetime(2026, 1, 1, 10, 0, tzinfo=UTC),
+            created_at=datetime(2026, 1, 1, 10, 0, tzinfo=UTC),
+        )
+    )
+    s.commit()
+    candidates = select_daily_candidates(
+        s, daily_run_id=str(uuid.uuid4()), logical_date="2026-01-02"
+    )
+    assert any(c.category == "REQUEST_DATA_FINDING" for c in candidates)
+    best, _ = select_editorial_daily_candidate(candidates)
+    assert best is not None
+    draft, rejection = create_draft(
+        s,
+        best,
+        empirical=dict(best.evidence),
+        structured_numbers={},
+        language="ENGLISH",
+    )
+    assert draft is not None, rejection
+    # Natural-language translation of REQUEST_DATA — no internal enum.
+    assert "not sufficient yet" in draft.text
+    assert "REQUEST_DATA" not in draft.text
+
+
+def test_editorial_selection_max_one_and_policy_filter() -> None:
+    private = _candidate("r1", category="ALPHA_CANDIDATE")
+    public_negative = _candidate("r1", category="NEGATIVE_RESULT")
+    public_negative.publication_value = publication_value_score(
+        {"clarity": 1, "novelty": 1}
+    )
+    best, reason = select_editorial_daily_candidate([private, public_negative])
+    assert best is not None and best.category == "NEGATIVE_RESULT"
+    assert "publishable" in reason.get("reason", "") or "value" in reason.get(
+        "reason", ""
+    )
+
+
+def test_no_edge_day_can_still_select_paper_candidate() -> None:
+    """Zero alpha days can still yield a paper explainer (no forced zero)."""
+    from datetime import UTC, datetime
+
+    from quant_research_radar.db import SourceItem
+
+    s = _session()
+    s.add(
+        SourceItem(
+            source_type="academic",
+            source_name="arxiv",
+            external_id="2609.99999",
+            canonical_url="http://arxiv.org/abs/2609.99999",
+            title="A paper worth reading about market microstructure",
+            authors=["A. Author"],
+            published_at=datetime(2026, 1, 1, tzinfo=UTC),
+            retrieved_at=datetime(2026, 1, 1, 10, 0, tzinfo=UTC),
+            content_sha256="x",
+        )
+    )
+    s.commit()
+    candidates = select_daily_candidates(
+        s, daily_run_id=str(uuid.uuid4()), logical_date="2026-01-02"
+    )
+    assert any(c.category == "PAPER_EXPLAINER" for c in candidates)
+    best, _ = select_editorial_daily_candidate(candidates)
+    assert best is not None
+    draft, rejection = create_draft(
+        s,
+        best,
+        empirical={},
+        structured_numbers={},
+        language="ENGLISH",
+    )
+    assert draft is not None, rejection
+    assert "A paper worth reading about market microstructure" in draft.text
+    assert "arxiv.org" in draft.text
+
+
+def test_paper_explainer_copy_keeps_source_lineage() -> None:
+    from quant_research_radar.publishing import generate_public_copy
+
+    candidate = _candidate(str(uuid.uuid4()), category="PAPER_EXPLAINER")
+    candidate.title = "Title of the paper"
+    candidate.evidence = {
+        "source_name": "arxiv",
+        "title": "Title of the paper",
+        "url": "https://arxiv.org/abs/2609.1",
+        "authors": ["A", "B"],
+    }
+    text = generate_public_copy(candidate, empirical=None, language="ENGLISH")
+    assert "Title of the paper" in text
+    assert "arxiv.org" in text
+    assert "for research context" in text
 
 
 def test_negative_result_remains_publishable() -> None:

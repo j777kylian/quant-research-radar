@@ -190,8 +190,9 @@ def test_recurrent_hypothesis_labeled_recurrent(tmp_path: Path) -> None:
     research = snapshot["research"]
     assert research["new_count"] == 1
     assert research["recurrent_count"] == 1
-    # "4h and 24h" must parse as LOW (4h), NOT 4 days high-fit (the 'd' in 'and').
-    assert research["high_fit_count"] == 0
+    # Endpoint-aware: "4h and 24h" keeps the 24h endpoint visible (HIGH),
+    # even though its 4h endpoint is LOW — 24h relevance is not suppressed.
+    assert research["high_fit_count"] == 1
 
 
 def test_source_capability_vs_run_outcome_distinct(tmp_path: Path) -> None:

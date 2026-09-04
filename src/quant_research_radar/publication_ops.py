@@ -20,11 +20,18 @@ from .db import (
     PublicationRecord,
     WeeklyRun,
 )
-from .delivery import daily_digest_text, send_discord, send_email, weekly_digest_text
+from .delivery import (
+    daily_digest_text,
+    daily_discord_text,
+    send_discord,
+    send_email,
+    weekly_digest_text,
+)
 from .publishing import (
     create_draft,
     render_effect_chart,
     select_daily_candidates,
+    select_editorial_daily_candidate,
     select_weekly_candidates,
 )
 from .x_client import publish_draft, x_mode
@@ -52,6 +59,30 @@ def after_daily(
         "failure_reasons": list(record.failure_reasons) if record else [],
         "high_fit_count": 0,
     }
+    # Daily Email must carry the Human Brief, not an operational summary: merge
+    # the persisted final structured summary (research + human layers).
+    from .reporting import collect_daily_snapshot
+
+    if record is not None:
+        snapshot = collect_daily_snapshot(session, record.id)
+        if snapshot:
+            summary.update(
+                {
+                    "high_fit_count": snapshot.get("research", {}).get(
+                        "high_fit_count", 0
+                    ),
+                    "new_count": snapshot.get("research", {}).get("new_count", 0),
+                    "recurrent_count": snapshot.get("research", {}).get(
+                        "recurrent_count", 0
+                    ),
+                    "findings": snapshot.get("human", {}).get("findings", []),
+                    "inputs": snapshot.get("human", {}).get("inputs", {}),
+                    "conclusion": _daily_conclusion_text(snapshot),
+                    "critic_reasons": snapshot.get("human", {}).get(
+                        "critic_reasons", {}
+                    ),
+                }
+            )
     email_result = send_email(
         session,
         settings,
@@ -65,7 +96,7 @@ def after_daily(
         settings,
         run_kind="DAILY",
         run_date=logical_date,
-        content=daily_digest_text(summary, str(report_path) if report_path else None),
+        content=daily_discord_text(summary),
     )
     result["delivery"] = {
         "email": email_result.status,
@@ -86,60 +117,85 @@ def after_daily(
         result["publication"] = {
             "status": "ZERO_POST",
             "reason": "no eligible candidate",
+            "pool": [],
         }
         return result
-    drafts = []
-    for candidate in candidates:
-        empirical = dict(candidate.evidence)
-        empirical.setdefault("disposition", "INCONCLUSIVE")
-        structured = {"0": 0.0}  # deterministic copy uses no invented numbers
-        draft, rejection = create_draft(
-            session,
-            candidate,
-            empirical=empirical,
-            structured_numbers=structured,
-            language=settings.publication_language,
+    selected, editorial = select_editorial_daily_candidate(candidates)
+    if selected is None:
+        result["publication"] = {
+            "status": "ZERO_POST",
+            "reason": editorial.get("reason", "no publishable candidate"),
+            "pool": [c.category for c in candidates],
+        }
+        return result
+    empirical = dict(selected.evidence)
+    empirical.setdefault("disposition", "INCONCLUSIVE")
+    structured = {"0": 0.0}  # deterministic copy uses no invented numbers
+    draft, rejection = create_draft(
+        session,
+        selected,
+        empirical=empirical,
+        structured_numbers=structured,
+        language=settings.publication_language,
+    )
+    if draft is None:
+        result["publication"] = {
+            "status": "REJECTED",
+            "reason": rejection,
+            "category": selected.category,
+        }
+        return result
+    visual_path = render_effect_chart(
+        output_root / "visuals",
+        structured_numbers=_visual_numbers(
+            session, empirical.get("event_study_result_id")
+        ),
+        title="Extreme vs ordinary funding: 24h forward-return difference",
+        sample_note="historical reconstructive sample",
+    )
+    draft.visual_ids = [visual_path.name]
+    session.commit()
+    mode = x_mode(settings)
+    if mode == "AUTO_PUBLISH":
+        x_result = publish_draft(
+            draft,
+            settings,
+            research_run_complete=research_complete,
+            already_published=_already_posted(session, draft),
+            media_path=str(visual_path),
         )
-        if draft is None:
-            result["publication"] = {"status": "REJECTED", "reason": rejection}
-            continue
-        visual_path = render_effect_chart(
-            output_root / "visuals",
-            structured_numbers=_visual_numbers(
-                session, empirical.get("event_study_result_id")
-            ),
-            title="Extreme vs ordinary funding: 24h forward-return difference",
-            sample_note="historical reconstructive sample",
+        session.add(
+            PublicationRecord(
+                draft_id=draft.id,
+                platform="X",
+                status=x_result.status,
+                external_post_id=x_result.external_post_id,
+                failure_reason=x_result.reason,
+            )
         )
-        draft.visual_ids = [visual_path.name]
         session.commit()
-        mode = x_mode(settings)
-        if mode == "AUTO_PUBLISH":
-            x_result = publish_draft(
-                draft,
-                settings,
-                research_run_complete=research_complete,
-                already_published=_already_posted(session, draft),
-                media_path=str(visual_path),
-            )
-            session.add(
-                PublicationRecord(
-                    draft_id=draft.id,
-                    platform="X",
-                    status=x_result.status,
-                    external_post_id=x_result.external_post_id,
-                    failure_reason=x_result.reason,
-                )
-            )
-            session.commit()
-            result["publication"] = {
-                "status": x_result.status,
-                "reason": x_result.reason,
-            }
-        else:
-            result["publication"] = {"status": "DRAFT_ONLY", "draft_id": str(draft.id)}
-        drafts.append(str(draft.id))
+        result["publication"] = {
+            "status": x_result.status,
+            "reason": x_result.reason,
+        }
+    else:
+        result["publication"] = {
+            "status": "DRAFT_ONLY",
+            "draft_id": str(draft.id),
+            "category": selected.category,
+            "editorial": editorial,
+            "pool": [c.category for c in candidates],
+        }
     return result
+
+
+def _daily_conclusion_text(snapshot: dict[str, Any]) -> str:
+    from .reporting import _human_conclusion
+
+    try:
+        return _human_conclusion(snapshot)
+    except Exception:
+        return ""
 
 
 def after_weekly(

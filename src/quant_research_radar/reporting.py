@@ -28,7 +28,12 @@ from .db import (
     utcnow,
 )
 from .scheduler import BEIJING_TZ
-from .user_fit import FIT_HIGH, FIT_OUT_OF_SCOPE, low_frequency_fit
+from .user_fit import (
+    FIT_HIGH,
+    FIT_OUT_OF_SCOPE,
+    low_frequency_fit,
+    parse_horizon_endpoints,
+)
 
 SUCCESS = "SUCCESS"
 DEGRADED = "DEGRADED"
@@ -174,7 +179,7 @@ def collect_daily_snapshot(
         h for h in hypotheses if low_frequency_fit(h.horizon) == FIT_OUT_OF_SCOPE
     ]
 
-    return {
+    snapshot = {
         "logical_date": daily.logical_date.isoformat(),
         "final_status": daily.status,
         "component_statuses": {
@@ -212,6 +217,8 @@ def collect_daily_snapshot(
         "report_path": daily.report_path,
         "prior_empirical": prior_empirical_for_families(session, all_families),
     }
+    _humanize(snapshot, session, daily, hypotheses, audit)
+    return snapshot
 
 
 def prior_empirical_for_families(
@@ -224,6 +231,191 @@ def prior_empirical_for_families(
             prior["family"] = fp
             out.append(prior)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Human research brief (readable translation of machine state)
+# ---------------------------------------------------------------------------
+
+_ACADEMIC_PROVIDERS = {"openalex", "crossref", "arxiv", "nber", "repec"}
+_PRACTITIONER_PROVIDERS = {"alpha-architect", "man-institute", "aqr"}
+
+
+def _human_title(hypothesis: ChannelHypothesis) -> str:
+    statement = (hypothesis.statement or "").strip().rstrip(".")
+    if len(statement) > 8:
+        return statement
+    universe = hypothesis.universe or "market"
+    return f"{universe} {hypothesis.outcome or 'research question'}".strip()
+
+
+def _human_question(hypothesis: ChannelHypothesis) -> str:
+    condition = (hypothesis.condition or "").lower()
+    outcome = (hypothesis.outcome or "").lower()
+    return f"Does {condition} change the {outcome}?"
+
+
+def _humanize(
+    snapshot: dict[str, Any],
+    session: Session,
+    daily: DailyRun,
+    hypotheses: list[ChannelHypothesis],
+    audit: dict[str, Any] | None,
+) -> None:
+    """Attach a readable brief layer; machine identities stay in the snapshot."""
+    critic_reasons: dict[str, str] = {}
+    for name, critic in ((daily.llm_summary or {}).get("critics") or {}).items():
+        reason = critic.get("reason") if isinstance(critic, dict) else None
+        if reason:
+            critic_reasons[name] = str(reason)
+
+    research = snapshot.get("research", {})
+    new_families = research.get("new_families", [])
+    audit_inputs = (audit or {}).get("fusion", {}).get("input_channels", [])
+
+    findings: list[dict[str, Any]] = []
+    family_tails = [family.split("|", 1)[-1] for family in new_families]
+
+    def _matched_new(hypothesis: ChannelHypothesis) -> bool:
+        return any(tail in (hypothesis.fingerprint or "") for tail in family_tails)
+
+    # Findings are the NEW families (audit-canonical). For MARKET families we
+    # show the concrete hypothesis; the single aggregated ACADEMIC family is
+    # shown once with its count, not once per source item.
+    new_market = [h for h in hypotheses if h.channel == "MARKET" and _matched_new(h)]
+    new_academic = [
+        h for h in hypotheses if h.channel == "ACADEMIC" and _matched_new(h)
+    ]
+
+    def _finding(hypothesis: ChannelHypothesis) -> dict[str, Any]:
+        readable = {
+            "title": _human_title(hypothesis),
+            "question": _human_question(hypothesis),
+            "universe": hypothesis.universe,
+            "horizon": hypothesis.horizon,
+            "horizon_endpoints": parse_horizon_endpoints(hypothesis.horizon),
+            "channel": hypothesis.channel,
+            "novelty": "NEW",
+            "status": f"{hypothesis.maturity} / {hypothesis.status}",
+            "disposition": research.get("technical_status", "n/a"),
+            "reason": next(iter(critic_reasons.values()), None),
+            "limitation": (
+                "Single-channel support; the critics request independent "
+                "evidence and methodological definition before any Event Study."
+            ),
+            "next": "Continue evidence accumulation; not yet recommended for an Event Study.",
+        }
+        return readable
+
+    findings.extend(_finding(h) for h in new_market[:2])
+    if new_academic:
+        academic_family = new_families[0].split("|", 1)[-1] if new_families else ""
+        findings.append(
+            {
+                "title": "New aggregated academic family on subsequent return / "
+                "volatility distributions",
+                "question": (
+                    "Does a pre-specified measurable condition derived from retained "
+                    "source evidence change the subsequent return or volatility "
+                    "distribution? (aggregated family; see Research Inputs for the "
+                    "underlying works)"
+                ),
+                "universe": "per-source universe (pre-specified)",
+                "horizon": "not pre-specified",
+                "horizon_endpoints": [],
+                "channel": "ACADEMIC",
+                "novelty": "NEW",
+                "status": "H1_STATISTICAL_HYPOTHESIS / DISCOVERED (aggregated)",
+                "disposition": research.get("technical_status", "n/a"),
+                "reason": next(iter(critic_reasons.values()), None),
+                "limitation": (
+                    "Metadata-only evidence; no new paper body was retrieved today. "
+                    "Aggregates the academic channel hypotheses into one family."
+                ),
+                "next": "Wait for new paper retrieval with archived content.",
+                "family_tail": academic_family,
+            }
+        )
+
+    # Research inputs: works retrieved in the window plus supporting items.
+    start, end = _day_bounds(daily.logical_date)
+    from .db import SourceItem
+
+    def _items(providers: set[str]) -> list[dict[str, Any]]:
+        rows = session.scalars(
+            select(SourceItem)
+            .where(SourceItem.retrieved_at >= start)
+            .where(SourceItem.retrieved_at < end)
+            .where(SourceItem.source_name.in_(sorted(providers)))
+            .order_by(SourceItem.retrieved_at)
+        ).all()
+        items = []
+        for item in rows[:5]:
+            body_present = bool((item.raw_text or "").strip())
+            summary = (
+                "Metadata collected; insufficient archived content for a "
+                "reliable result summary."
+                if not body_present
+                else "Content archived and available for reading."
+            )
+            items.append(
+                {
+                    "title": item.title,
+                    "source": item.source_name,
+                    "url": item.canonical_url,
+                    "published_at": (
+                        item.published_at.isoformat() if item.published_at else None
+                    ),
+                    "content_summary": summary,
+                }
+            )
+        return items
+
+    academic_items = _items(_ACADEMIC_PROVIDERS)
+    practitioner_items = _items(_PRACTITIONER_PROVIDERS)
+
+    # Market: structured funding summary over the window (never narrative).
+    from .db import MarketObservation
+
+    market_rows = session.scalars(
+        select(MarketObservation)
+        .where(MarketObservation.observed_at >= start)
+        .where(MarketObservation.observed_at < end)
+    ).all()
+    funding: dict[str, list[float]] = {}
+    for row in market_rows:
+        if row.observation_kind != "funding" or row.funding_rate is None:
+            continue
+        funding.setdefault(row.asset, []).append(row.funding_rate)
+    market_inputs: list[dict[str, Any]] = []
+    for asset, rates in sorted(funding.items()):
+        market_inputs.append(
+            {
+                "asset": asset,
+                "hours": len(rates),
+                "mean_funding": round(sum(rates) / len(rates), 8),
+                "max_abs_funding": round(max(abs(r) for r in rates), 8),
+            }
+        )
+
+    conclusion = (
+        "No material market-state change triggered a high-priority research candidate."
+        if not market_inputs
+        else "Market inputs summarized from structured funding observations only."
+    )
+
+    snapshot["human"] = {
+        "critic_reasons": critic_reasons,
+        "inputs": {
+            "academic": academic_items,
+            "practitioner": practitioner_items,
+            "market": market_inputs,
+            "market_conclusion": conclusion,
+        },
+        "findings": findings,
+        "findings_total": len(hypotheses),
+        "audit_input_channels": audit_inputs,
+    }
 
 
 def daily_conclusion(new_count: int, recurrent_count: int, high_fit_count: int) -> str:
@@ -253,6 +445,10 @@ def render_daily_markdown(summary: dict[str, Any]) -> str:
     comp = summary.get("component_statuses", {})
     market = summary.get("market", {})
     research = summary.get("research", {})
+    human = summary.get("human", {})
+    inputs = human.get("inputs", {})
+    findings = human.get("findings", [])
+    critic_reasons = human.get("critic_reasons", {})
     lines = [
         "# Daily Quant Research Radar",
         "",
@@ -280,37 +476,101 @@ def render_daily_markdown(summary: dict[str, Any]) -> str:
         ]
     lines += [
         "",
-        "## Research Collection",
-        "- **Academic:** " + _source_line(summary.get("academic_sources", {})),
-        "- **Practitioner:** " + _source_line(summary.get("practitioner_sources", {})),
+        "## Today's Research Inputs",
         "",
-        "## Research Intelligence",
-        f"- Channel hypotheses retained: {research.get('channel_hypotheses', 0)}",
-        f"- New hypothesis families: {research.get('new_count', len(research.get('new_families', [])))}",
-        f"- Recurrent families: {research.get('recurrent_count', 0)}",
-        f"- Technical status: {research.get('technical_status', 'n/a')}",
-        f"- Critics: {_critic_line(research.get('critics', {}))}",
-        "",
-        "## Today's Important Findings",
+        "### Academic",
     ]
-    new_families = research.get("new_families", [])
-    new_count = research.get("new_count", len(new_families))
-    if new_families:
-        for family in new_families[:3]:
-            lines.append(f"- New: `{family}`")
-        if new_count == 0 and research.get("recurrent_count", 0):
+    academic_inputs = inputs.get("academic", [])
+    if academic_inputs:
+        for item in academic_inputs:
+            lines.append(f"- **{item.get('title')}**")
             lines.append(
-                f"- Recurrent this run (prior knowledge): {research.get('recurrent_count', 0)} hypotheses."
+                f"  - Source: {item.get('source')} | published: "
+                f"{item.get('published_at') or 'n/a'} | {item.get('content_summary')}"
             )
+            if item.get("url"):
+                lines.append(f"  - Link: {item.get('url')}")
+    else:
+        lines.append("- No new academic works were retrieved today.")
+    lines += ["", "### Practitioner"]
+    practitioner_inputs = inputs.get("practitioner", [])
+    if practitioner_inputs:
+        for item in practitioner_inputs:
+            lines.append(f"- **{item.get('title')}**")
+            lines.append(
+                f"  - Publisher: {item.get('source')} | published: "
+                f"{item.get('published_at') or 'n/a'} | {item.get('content_summary')}"
+            )
+            if item.get("url"):
+                lines.append(f"  - Link: {item.get('url')}")
+    else:
+        lines.append("- No new practitioner items were retrieved today.")
+    lines += ["", "### Market"]
+    market_inputs = inputs.get("market", [])
+    if market_inputs:
+        for item in market_inputs:
+            lines.append(
+                f"- **{item.get('asset')}** — {item.get('hours')}h of funding "
+                f"observations; mean {item.get('mean_funding')}, "
+                f"max |funding| {item.get('max_abs_funding')}."
+            )
+    else:
+        lines.append(
+            "- " + inputs.get("market_conclusion", "No notable market-state change.")
+        )
+    lines += [
+        "",
+        "## Important Findings",
+    ]
+    if findings:
+        for finding in findings[:5]:
+            lines.append(f"- **{finding.get('title')}**")
+            lines.append(f"  - Question: {finding.get('question')}")
+            lines.append(
+                f"  - Channel: {finding.get('channel')} | novelty: "
+                f"{finding.get('novelty')} | status: {finding.get('status')}"
+            )
+            endpoints = finding.get("horizon_endpoints") or []
+            if endpoints:
+                fit_text = ", ".join(
+                    f"{e.get('value')}{e.get('unit')} → {e.get('fit')}"
+                    for e in endpoints
+                )
+                lines.append(f"  - Horizon endpoints: {fit_text}")
+            lines.append(f"  - Limitation: {finding.get('limitation')}")
+            lines.append(f"  - Next: {finding.get('next')}")
     elif research.get("channel_hypotheses", 0):
-        lines.append("- Recurrence/evidence accumulation only; no new family today.")
+        lines.append(
+            "- No new family today; recurrent hypotheses remain under monitoring."
+        )
     else:
         lines.append("- No important finding today (no new or recurrent hypotheses).")
+    if critic_reasons:
+        lines += ["", "## Critic Reasons (why the research gate asked for more data)"]
+        for name, reason in critic_reasons.items():
+            bounded = (
+                reason if len(reason) <= 420 else reason[:420].rsplit(" ", 1)[0] + " …"
+            )
+            lines.append(f"- **{name.replace('_', ' ').title()}:** {bounded}")
+    lines += [
+        "",
+        "## Negative / Inconclusive / Blocked Findings",
+    ]
+    blocked = research.get("channel_hypotheses", 0) - research.get("new_count", 0)
+    if research.get("technical_status") == "CRITIC_REQUEST_DATA" or blocked > 0:
+        lines.append(
+            "- All retained hypotheses are blocked from promotion: critics request "
+            "additional independent evidence or methodological definition "
+            "(see Critic Reasons). No rejection was issued today."
+        )
+    else:
+        lines.append("- None today.")
     lines += [
         "",
         "## Low-Frequency Fit",
-        f"- High-fit (1d-30d) candidates: {research.get('high_fit_count', 0)}",
-        f"- Out-of-scope (<2h) hypotheses retained scientifically: {research.get('out_of_scope_count', 0)}",
+        f"- Visible high-fit (1d-30d) hypotheses: {research.get('high_fit_count', 0)}",
+        f"- Out-of-scope (<2h only) hypotheses retained scientifically: "
+        f"{research.get('out_of_scope_count', 0)}",
         "",
         "## Knowledge Updates",
     ]
@@ -319,21 +579,42 @@ def render_daily_markdown(summary: dict[str, Any]) -> str:
     lines.append(
         "- Prior-context novelty counts: "
         + (", ".join(f"{k}={v}" for k, v in novelty.items()) if novelty else "n/a")
-        + f"; new hypothesis families this run: {new_count}"
+        + f"; new hypothesis families this run: {research.get('new_count', 0)}"
     )
     lines += [
         "",
         "## Daily Conclusion",
-        daily_conclusion(
-            new_count,
-            research.get("recurrent_count", 0),
-            research.get("high_fit_count", 0),
-        ),
+        _human_conclusion(summary),
         "",
         f"_Final report generated {utcnow().isoformat()} from persisted state._",
         "",
     ]
     return "\n".join(lines)
+
+
+def _human_conclusion(summary: dict[str, Any]) -> str:
+    research = summary.get("research", {})
+    human = summary.get("human", {})
+    findings = human.get("findings", [])
+    new_count = research.get("new_count", 0)
+    recurrent = research.get("recurrent_count", 0)
+    high_fit = research.get("high_fit_count", 0)
+    if not findings and new_count == 0 and recurrent == 0:
+        return (
+            "No useful research progress today: no new hypothesis families, no "
+            "recurrence requiring attention, and no market-state change that "
+            "triggered a candidate."
+        )
+    if findings:
+        top = findings[0]
+        return (
+            f"Most important today: {top.get('title')} ({top.get('novelty')}). "
+            f"{new_count} new and {recurrent} recurrent families; "
+            f"{high_fit} visible 1d-30d candidate(s). "
+            "Critics require more evidence or methodological definition before "
+            "any Event Study is recommended; no candidate is test-ready yet."
+        )
+    return daily_conclusion(new_count, recurrent, high_fit)
 
 
 def _source_line(statuses: dict[str, Any]) -> str:

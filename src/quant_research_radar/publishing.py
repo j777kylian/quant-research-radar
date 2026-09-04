@@ -33,13 +33,22 @@ from .db import (  # noqa: E402
     utcnow,
 )
 
-# Candidate categories
+# Candidate categories (editorial pool; negative/inconclusive are first-class)
 MARKET_OBSERVATION = "MARKET_OBSERVATION"
 EMPIRICAL_RESULT = "EMPIRICAL_RESULT"
 NEGATIVE_RESULT = "NEGATIVE_RESULT"
+INCONCLUSIVE_RESULT = "INCONCLUSIVE_RESULT"
+REQUEST_DATA_FINDING = "REQUEST_DATA_FINDING"
 METHODOLOGY_NOTE = "METHODOLOGY_NOTE"
 WEEKLY_RESEARCH_ROUNDUP = "WEEKLY_RESEARCH_ROUNDUP"
+WEEKLY_NEGATIVE_RESULT = "WEEKLY_NEGATIVE_RESULT"
 DATA_QUALITY_FINDING = "DATA_QUALITY_FINDING"
+PAPER_EXPLAINER = "PAPER_EXPLAINER"
+PRACTITIONER_EXPLAINER = "PRACTITIONER_EXPLAINER"
+PAPER_PLUS_MARKET_CONNECTION = "PAPER_PLUS_MARKET_CONNECTION"
+HYPOTHESIS_EXPLAINER = "HYPOTHESIS_EXPLAINER"
+RESEARCH_PROCESS_NOTE = "RESEARCH_PROCESS_NOTE"
+ALPHA_CANDIDATE = "ALPHA_CANDIDATE"
 
 # Publication policy classes
 PUBLIC = "PUBLIC"
@@ -123,27 +132,32 @@ def publication_value_score(components: dict[str, int]) -> dict[str, Any]:
 def select_daily_candidates(
     session: Session, *, daily_run_id: str, logical_date: str
 ) -> list[PublicationCandidate]:
-    """Evaluate a completed Daily cycle for publishable material.
+    """Build the editorial candidate pool for a completed Daily cycle.
 
-    ZERO candidates is a valid outcome; operational noise is never selected.
+    Sources: any eligible research artifact — an Event Study result, new
+    hypothesis families (REQUEST_DATA / hypothesis explainer), newly retrieved
+    academic works (paper explainer), or an informative research-process note.
+    ZERO candidates is valid; absence of alpha is NOT a reason for zero by
+    itself (negative/inconclusive/process content is first-class).
     """
     candidates: list[PublicationCandidate] = []
+    day_end = _day_end(logical_date)
+
     latest_result = session.scalars(
         select(EventStudyResultRecord)
-        .where(EventStudyResultRecord.created_at <= _day_end(logical_date))
+        .where(EventStudyResultRecord.created_at <= day_end)
         .order_by(EventStudyResultRecord.created_at.desc())
         .limit(1)
     ).first()
     if latest_result is not None:
         category = (
             NEGATIVE_RESULT
-            if latest_result.disposition
-            in {
-                "INCONCLUSIVE",
-                "REJECTED",
-                "DATA_INSUFFICIENT",
-            }
-            else EMPIRICAL_RESULT
+            if latest_result.disposition == "REJECTED"
+            else (
+                INCONCLUSIVE_RESULT
+                if latest_result.disposition in {"INCONCLUSIVE", "DATA_INSUFFICIENT"}
+                else EMPIRICAL_RESULT
+            )
         )
         value = publication_value_score(
             {
@@ -173,7 +187,173 @@ def select_daily_candidates(
                 publication_value=value,
             )
         )
+
+    # New hypothesis families in this Daily window (REQUEST_DATA / explainers).
+    # MARKET families lead (cleanest, freshest); academic statement templates
+    # are converted to readable paper-insight titles.
+    from .db import ChannelHypothesis
+
+    hypotheses = list(
+        session.scalars(
+            select(ChannelHypothesis)
+            .where(ChannelHypothesis.created_at <= day_end)
+            .order_by(ChannelHypothesis.created_at.desc())
+            .limit(40)
+        ).all()
+    )
+    hypotheses.sort(
+        key=lambda h: (h.channel != "MARKET", -float(h.created_at.timestamp()))
+    )
+    seen_families: set[str] = set()
+    for hypothesis in hypotheses:
+        family = hypothesis.fingerprint
+        if family in seen_families:
+            continue
+        seen_families.add(family)
+        if len(seen_families) > 2:
+            break
+        category = (
+            REQUEST_DATA_FINDING
+            if hypothesis.maturity == "H1_STATISTICAL_HYPOTHESIS"
+            else HYPOTHESIS_EXPLAINER
+        )
+        value = publication_value_score(
+            {
+                "clarity": 4,
+                "novelty": 4,
+                "educational": 4,
+                "timeliness": 2,
+                "visualizable": 3,
+                "source_quality": 3,
+                "explainable": 4,
+            }
+        )
+        candidates.append(
+            PublicationCandidate(
+                source_run_id=daily_run_id,
+                source_kind="DAILY",
+                category=category,
+                title=_human_candidate_title(hypothesis),
+                summary=(
+                    f"Hypothesis family from the {hypothesis.channel} channel. "
+                    "Critics requested additional independent evidence before "
+                    "any Event Study; interpreted as a research-in-progress note."
+                ),
+                evidence={
+                    "hypothesis_id": str(hypothesis.id),
+                    "family": family,
+                    "channel": hypothesis.channel,
+                    "disposition": "REQUEST_DATA",
+                    "status": f"{hypothesis.maturity} / {hypothesis.status}",
+                },
+                publication_value=value,
+            )
+        )
+
+    # Newly retrieved academic works in the window (paper explainers).
+    from .db import SourceItem
+
+    papers = session.scalars(
+        select(SourceItem)
+        .where(
+            SourceItem.source_name.in_(
+                ["openalex", "crossref", "arxiv", "nber", "repec"]
+            )
+        )
+        .where(SourceItem.retrieved_at <= day_end)
+        .order_by(SourceItem.retrieved_at.desc())
+        .limit(3)
+    ).all()
+    for paper in papers:
+        value = publication_value_score(
+            {
+                "clarity": 4,
+                "novelty": 3,
+                "educational": 4,
+                "timeliness": 2,
+                "visualizable": 2,
+                "source_quality": 4,
+                "explainable": 4,
+            }
+        )
+        candidates.append(
+            PublicationCandidate(
+                source_run_id=daily_run_id,
+                source_kind="DAILY",
+                category=PAPER_EXPLAINER,
+                title=paper.title,
+                summary=(
+                    "Newly retrieved academic work summarized from archived "
+                    "metadata; source attribution retained in the bundle."
+                ),
+                evidence={
+                    "source_item_id": str(paper.id),
+                    "source_name": paper.source_name,
+                    "title": paper.title,
+                    "url": paper.canonical_url or "",
+                    "authors": list(paper.authors or [])[:4],
+                },
+                publication_value=value,
+            )
+        )
+
+    # Research-process note: informative only when several new families were
+    # created and none passed the research gate (real lesson, not daily filler).
+    if len(seen_families) >= 2 and latest_result is None:
+        value = publication_value_score(
+            {
+                "clarity": 4,
+                "novelty": 3,
+                "educational": 4,
+                "timeliness": 2,
+                "visualizable": 2,
+                "source_quality": 3,
+                "explainable": 4,
+            }
+        )
+        candidates.append(
+            PublicationCandidate(
+                source_run_id=daily_run_id,
+                source_kind="DAILY",
+                category=RESEARCH_PROCESS_NOTE,
+                title=f"Radar generated {len(seen_families)} new research hypotheses today — none passed the research gate",
+                summary=(
+                    "A research-process note: several new hypothesis families "
+                    "were created, and every critic requested additional "
+                    "independent evidence or methodological definition. No "
+                    "Event Study is recommended yet."
+                ),
+                evidence={
+                    "logical_date": logical_date,
+                    "new_families": len(seen_families),
+                    "disposition": "REQUEST_DATA",
+                },
+                publication_value=value,
+            )
+        )
     return candidates
+
+
+def select_editorial_daily_candidate(
+    candidates: list[PublicationCandidate],
+) -> tuple[PublicationCandidate | None, dict[str, Any]]:
+    """Editorial selection: best single primary candidate (max 1 per day).
+
+    Ranks by auditable PublicationValueScore; a candidate must be publishable
+    by policy. Returns (None, reason) when nothing is worth publishing.
+    """
+    publishable = [
+        candidate
+        for candidate in candidates
+        if classify_policy(candidate) in PUBLISHABLE
+    ]
+    if not publishable:
+        return None, {"reason": "no publishable candidate in pool"}
+    best = max(
+        publishable,
+        key=lambda candidate: (candidate.publication_value or {}).get("total", 0),
+    )
+    return best, {"reason": "highest publication value"}
 
 
 def select_weekly_candidates(
@@ -205,6 +385,19 @@ def select_weekly_candidates(
     return candidates
 
 
+def _human_candidate_title(hypothesis: Any) -> str:
+    """Readable title from persisted hypothesis text (no fingerprint syntax)."""
+    statement = (hypothesis.statement or "").strip().rstrip(".")
+    import re as _re
+
+    quoted = _re.search(r"described by '(.+?)'", statement)
+    if quoted:
+        return f"Paper insight: {quoted.group(1)}"
+    if len(statement) > 8:
+        return statement
+    return f"{hypothesis.universe or 'market'} {hypothesis.outcome or 'research'}"
+
+
 def _day_end(logical_date: str) -> datetime:
     return datetime.fromisoformat(f"{logical_date}T23:59:59+00:00").replace(tzinfo=UTC)
 
@@ -217,16 +410,25 @@ def _day_end(logical_date: str) -> datetime:
 def classify_policy(candidate: PublicationCandidate) -> str:
     if candidate.category == EMPIRICAL_RESULT:
         return PUBLIC_WITH_LIMITATIONS
-    if candidate.category == NEGATIVE_RESULT:
+    if candidate.category in {NEGATIVE_RESULT, WEEKLY_NEGATIVE_RESULT}:
         return PUBLIC  # negative results are valuable public science
-    if candidate.category == METHODOLOGY_NOTE:
+    if candidate.category in {METHODOLOGY_NOTE, RESEARCH_PROCESS_NOTE}:
         return PUBLIC
+    if candidate.category == PAPER_EXPLAINER:
+        return PUBLIC  # general literature explanation with attribution
     if candidate.category in {
         MARKET_OBSERVATION,
         WEEKLY_RESEARCH_ROUNDUP,
         DATA_QUALITY_FINDING,
+        INCONCLUSIVE_RESULT,
+        REQUEST_DATA_FINDING,
+        HYPOTHESIS_EXPLAINER,
+        PRACTITIONER_EXPLAINER,
+        PAPER_PLUS_MARKET_CONNECTION,
     }:
         return PUBLIC_WITH_LIMITATIONS
+    if candidate.category == ALPHA_CANDIDATE:
+        return PRIVATE  # potentially executable alpha stays private by default
     return PRIVATE
 
 
@@ -348,11 +550,18 @@ def generate_public_copy(
 ) -> str:
     """Deterministic public copy from structured evidence.
 
-    The publishing LLM may refine wording later, but the released contract is:
-    clear observation, core evidence, interpretation, limitation, attribution.
+    Category-aware templates; every statement derives from persisted
+    candidate/evidence fields — no LLM invention, no fabricated numbers.
+    Structure: observation/question, core evidence, interpretation,
+    limitation, attribution.
     """
     disposition = (empirical or {}).get("disposition")
-    if candidate.category == WEEKLY_RESEARCH_ROUNDUP:
+    category = candidate.category
+    title = (candidate.title or "").strip()
+    summary = (candidate.summary or "").strip()
+    evidence = candidate.evidence or {}
+
+    if category == WEEKLY_RESEARCH_ROUNDUP:
         body = (
             "Weekly research roundup from Quant Research Radar.\n\n"
             "This week the Radar aggregated daily evidence across academic and "
@@ -362,7 +571,60 @@ def generate_public_copy(
             "Limitation: all observations are research artifacts, not trading advice.\n\n"
             "Source: Quant Research Radar weekly review."
         )
+    elif category == PAPER_EXPLAINER:
+        url = evidence.get("url") or ""
+        authors = ", ".join(evidence.get("authors") or []) or "unknown authors"
+        body = (
+            f"Reading: {title}\n\n"
+            f"{summary or 'A newly retrieved academic work in quantitative research.'}\n\n"
+            f"Interpretation: paper summary derived from archived metadata; the work "
+            f"is presented for research context, not as a validated result.\n\n"
+            f"Limitation: we summarize from archived content and provenance; "
+            f"read the original before relying on any claim.\n\n"
+            f"Source: {authors} — {evidence.get('source_name') or 'academic source'}"
+            + (f" ({url})" if url else "")
+        )
+    elif category in {REQUEST_DATA_FINDING, HYPOTHESIS_EXPLAINER}:
+        body = (
+            f"Research hypothesis: {title}\n\n"
+            f"{summary}\n\n"
+            "Interpretation: this is an unvalidated hypothesis — the evidence is "
+            "not sufficient yet. Critics requested additional independent evidence "
+            "or methodological definition before any test.\n\n"
+            "Limitation: single-channel and/or metadata-only support; not a trading "
+            "signal.\n\n"
+            "Source: Quant Research Radar research registry."
+        )
+    elif category == RESEARCH_PROCESS_NOTE:
+        body = (
+            f"{title}\n\n"
+            f"{summary}\n\n"
+            "Interpretation: a useful negative-process outcome — hypothesis "
+            "generation is working, and the research gate correctly declined to "
+            "promote unvalidated ideas.\n\n"
+            "Limitation: describes internal research process, not market results.\n\n"
+            "Source: Quant Research Radar daily research review."
+        )
+    elif category in {METHODOLOGY_NOTE, DATA_QUALITY_FINDING}:
+        body = (
+            f"{title}\n\n"
+            f"{summary}\n\n"
+            "Interpretation: methodological or data-quality observations do not "
+            "change any scientific conclusion by themselves.\n\n"
+            "Limitation: diagnostics are context-specific.\n\n"
+            "Source: Quant Research Radar research audit."
+        )
+    elif category == MARKET_OBSERVATION:
+        body = (
+            f"{title}\n\n"
+            f"{summary}\n\n"
+            "Interpretation: market-state observation from structured funding data; "
+            "no directional recommendation.\n\n"
+            "Limitation: descriptive only.\n\n"
+            "Source: Quant Research Radar market observations."
+        )
     else:
+        # EMPIRICAL_RESULT / NEGATIVE_RESULT / INCONCLUSIVE_RESULT / WEEKLY_NEGATIVE_RESULT
         concentration = (empirical or {}).get("asset_concentration") or "cross-asset"
         body = (
             f"We tested whether extreme perpetual funding is associated with subsequent returns.\n\n"
@@ -375,20 +637,26 @@ def generate_public_copy(
             f"Source: Quant Research Radar event study on Hyperliquid funding data."
         )
     if language == "CHINESE":
-        body = (
-            "我们检验了极端永续资金费率是否与后续收益相关。\n\n"
-            f"核心证据：合并24小时对比已完成，结论为 {disposition}。\n\n"
-            "解释：这是历史重构样本中的样本内关联，不是交易信号。\n\n"
-            "局限：方法论审查未能完全验证该研究；样本覆盖约七个月的逐小时数据。\n\n"
-            "来源：Quant Research Radar 基于 Hyperliquid 资金费率的事件研究。"
-        )
+        body = _chinese_fallback(candidate, body)
     elif language == "BILINGUAL":
-        body = (
-            body
-            + "\n\n---\n\n"
-            + generate_public_copy(candidate, empirical=empirical, language="CHINESE")
-        )
+        body = body + "\n\n---\n\n" + _chinese_fallback(candidate, body)
     return scrub_privacy(body)
+
+
+def _chinese_fallback(candidate: PublicationCandidate, english_body: str) -> str:
+    """Honest minimal Chinese frame; keeps verified English evidence verbatim.
+
+    A full per-category translation would duplicate the pipeline and risks
+    drifting from the verified English content; the Chinese render therefore
+    frames the title and points to the verified English body + source bundle.
+    """
+    title = (candidate.title or "").strip()
+    return (
+        f"# {title}\n\n"
+        "（中文框架；以下为经核实的英文研究内容，未作机器改写以免偏离来源。）\n\n"
+        f"{english_body}\n\n"
+        "本内容为研究资料，不构成投资建议。"
+    )
 
 
 # ---------------------------------------------------------------------------
