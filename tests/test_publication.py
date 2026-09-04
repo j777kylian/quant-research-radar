@@ -547,6 +547,7 @@ def test_request_data_hypothesis_can_be_editorial_candidate() -> None:
     # Natural-language translation of REQUEST_DATA — no internal enum.
     assert "not sufficient yet" in draft.text
     assert "REQUEST_DATA" not in draft.text
+    assert draft.claims[0]["class"] == "HYPOTHESIS"
 
 
 def test_editorial_selection_max_one_and_policy_filter() -> None:

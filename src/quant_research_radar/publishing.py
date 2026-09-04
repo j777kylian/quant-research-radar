@@ -792,7 +792,20 @@ def create_draft(
     claims = verdict.claims or [
         {
             "claim": "deterministic template copy",
-            "class": CLAIM_EMPIRICAL,
+            "class": (
+                CLAIM_HYPOTHESIS
+                if candidate.category in {REQUEST_DATA_FINDING, HYPOTHESIS_EXPLAINER}
+                else CLAIM_SOURCE_SUPPORTED
+                if candidate.category
+                in {
+                    PAPER_EXPLAINER,
+                    PRACTITIONER_EXPLAINER,
+                    PAPER_PLUS_MARKET_CONNECTION,
+                }
+                else CLAIM_INFERENCE
+                if candidate.category == MARKET_OBSERVATION
+                else CLAIM_EMPIRICAL
+            ),
             "supported": True,
         }
     ]
