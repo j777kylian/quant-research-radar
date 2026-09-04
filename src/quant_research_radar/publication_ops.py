@@ -7,6 +7,7 @@ publication failure never degrades research status; retries are idempotent.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -33,6 +34,8 @@ from .delivery import (
     weekly_digest_text,
 )
 from .publishing import (
+    PUBLISHABLE,
+    classify_policy,
     create_draft,
     render_effect_chart,
     select_daily_candidates,
@@ -51,65 +54,152 @@ def _persist_social_package_impl(
     reason: str,
     output_root: Path,
     draft_text: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
-    """Persist one deterministic editorial package; never touches science."""
+    """Persist a terminal package and its complete black-box artifact set."""
+    if recommendation not in {"PUBLISH", "SKIP"}:
+        raise ValueError("daily package recommendation must be PUBLISH or SKIP")
+    metadata = metadata or {}
     existing = session.scalar(
         select(DailySocialEditorialPackage).where(
             DailySocialEditorialPackage.logical_date == daily.logical_date
         )
     )
+    topic_ids = [
+        str(t.id)
+        for t in session.scalars(
+            select(TopicBrief).where(TopicBrief.source_run_id == str(daily.id))
+        ).all()
+    ]
+    bundle = metadata.get("source_bundle") or {}
+    if recommendation == "PUBLISH":
+        checks = {
+            "selected_candidate": selected is not None,
+            "nonempty_draft": bool(draft_text and draft_text.strip()),
+            "policy_allowed": metadata.get("policy") in PUBLISHABLE,
+            "verification_pass": (metadata.get("verification") or {}).get("status")
+            == "PASS",
+            "source_bundle": bool(bundle),
+        }
+        failed = [name for name, passed in checks.items() if not passed]
+        if failed:
+            recommendation = "SKIP"
+            reason = "publish preconditions failed: " + ", ".join(failed)
+    fmt = metadata.get("format", "THREAD" if len(candidates) > 3 else "SHORT_POST")
+    selected_meta = metadata.get("selected") or {}
+    selected_topic_id = metadata.get("selected_topic_id") or selected_meta.get(
+        "topic_id"
+    )
+    selected_category = selected_meta.get("category") or (
+        selected.category if selected else None
+    )
+    selected_title = selected_meta.get("title") or (
+        selected.title if selected else None
+    )
     payload = {
+        "package_id": str(existing.id) if existing else None,
+        "date": daily.logical_date.isoformat(),
         "logical_date": daily.logical_date.isoformat(),
         "source_run_id": str(daily.id),
-        "recommendation": recommendation,
+        "run_ids": [str(daily.id)],
+        "source_ids": metadata.get("source_ids", []),
+        "topic_ids": topic_ids,
+        "selected_candidate_id": str(selected.id) if selected and selected.id else None,
+        "selected_topic_id": selected_topic_id,
+        "selected_category": selected_category,
+        "selected_title": selected_title,
+        "selected": metadata.get("selected", {}),
+        "reason": reason,
         "selection_reason": reason,
-        "selected_candidate_id": str(selected.id)
-        if selected is not None and selected.id
-        else None,
+        "score": metadata.get("score"),
+        "format": fmt,
+        "policy": metadata.get("policy"),
+        "verification": metadata.get("verification", {"status": "NOT_RUN"}),
+        "copy_quality": metadata.get("copy_quality", {"status": "NOT_RUN"}),
+        "recommendation": recommendation,
+        "skip_reason": metadata.get("skip_reason")
+        or (reason if recommendation == "SKIP" else None),
+        "draft_id": metadata.get("draft_id"),
+        "source_bundle": bundle,
+        "visual_ids": metadata.get("visual_ids", []),
+        "generated_at": datetime.now(UTC).isoformat(),
+        "editorial_version": metadata.get("editorial_version", "social-editorial-v1"),
         "candidate_themes": [
             {"category": c.category, "title": c.title, "score": c.publication_value}
             for c in candidates
         ],
-        "topic_brief_ids": [
-            str(t.id)
-            for t in session.scalars(
-                select(TopicBrief).where(TopicBrief.source_run_id == str(daily.id))
-            ).all()
-        ],
+        "topic_brief_ids": topic_ids,
     }
     package_dir = output_root / "social" / daily.logical_date.isoformat()
     package_dir.mkdir(parents=True, exist_ok=True)
-    package_path = package_dir / "summary.json"
-    package_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+    editorial_text = "\n".join(
+        [
+            f"# Social Editorial — {daily.logical_date.isoformat()}",
+            "",
+            f"Recommendation: {recommendation}",
+            f"Selected story: {selected_title or 'None'}",
+            f"Category: {selected_category or 'None'}",
+            f"Format: {fmt}",
+            f"Policy: {metadata.get('policy') or 'NOT_RUN'}",
+            f"Verification: {(metadata.get('verification') or {}).get('status', 'NOT_RUN')}",
+            f"Copy quality: {(metadata.get('copy_quality') or {}).get('status', 'NOT_RUN')}",
+            "",
+            "## Candidate themes",
+            *[
+                f"- {c.category}: {c.title} (score {(c.publication_value or {}).get('total', 0)})"
+                for c in candidates
+            ],
+            "",
+            f"## Rationale\n{reason}",
+            "",
+            f"## Public copy\n{draft_text.strip() if draft_text and draft_text.strip() else 'No draft: this package is SKIP.'}",
+            "",
+            f"## Source grounding\n{'Present' if bundle else 'No source bundle available.'}",
+        ]
     )
-    if draft_text:
+    (package_dir / "editorial.md").write_text(
+        editorial_text,
+        encoding="utf-8",
+    )
+    (package_dir / "sources.json").write_text(
+        json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    if recommendation == "PUBLISH" and draft_text and draft_text.strip():
         (package_dir / "draft.md").write_text(draft_text, encoding="utf-8")
+    elif (package_dir / "draft.md").exists():
+        (package_dir / "draft.md").unlink()
     if existing is None:
         existing = DailySocialEditorialPackage(
             logical_date=daily.logical_date,
             source_run_id=str(daily.id),
-            topic_brief_ids=payload["topic_brief_ids"],
+            topic_brief_ids=topic_ids,
             candidates=payload["candidate_themes"],
             selected_candidate_id=payload["selected_candidate_id"],
             recommendation=recommendation,
             selection_reason=reason,
-            content_format="THREAD" if len(candidates) > 3 else "SHORT_POST",
-            draft_text=draft_text,
-            source_bundle={},
+            content_format=fmt,
+            draft_text=draft_text if recommendation == "PUBLISH" else None,
+            source_bundle=bundle,
             output_path=str(package_dir),
         )
         session.add(existing)
     else:
-        existing.topic_brief_ids = cast(list[str], payload["topic_brief_ids"])
+        existing.topic_brief_ids = topic_ids
         existing.candidates = cast(list[dict[str, Any]], payload["candidate_themes"])
         existing.selected_candidate_id = cast(
             str | None, payload["selected_candidate_id"]
         )
         existing.recommendation = recommendation
         existing.selection_reason = reason
-        existing.draft_text = draft_text
+        existing.content_format = fmt
+        existing.draft_text = draft_text if recommendation == "PUBLISH" else None
+        existing.source_bundle = bundle
         existing.output_path = str(package_dir)
+    session.flush()
+    payload["package_id"] = str(existing.id)
+    (package_dir / "summary.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+    )
     session.commit()
 
 
@@ -122,6 +212,7 @@ def _persist_social_package(
     reason: str,
     output_root: Path,
     draft_text: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> bool:
     """Best-effort downstream persistence; never changes research outcome."""
     try:
@@ -134,8 +225,9 @@ def _persist_social_package(
             reason,
             output_root,
             draft_text,
+            metadata,
         )
-    except (OSError, SQLAlchemyError):
+    except (OSError, SQLAlchemyError, ValueError):
         session.rollback()
         return False
     return True
@@ -405,10 +497,33 @@ def after_daily(
         record,
         candidates,
         selected,
-        result["publication"]["status"],
+        "PUBLISH",
         editorial.get("reason", "highest publication value"),
         output_root,
         draft.text,
+        {
+            "selected": {
+                "id": str(selected.id),
+                "title": selected.title,
+                "category": selected.category,
+            },
+            "score": selected.publication_value,
+            "policy": classify_policy(selected),
+            "verification": {"status": "PASS", "claims": draft.claims},
+            "copy_quality": {
+                "status": "PASS",
+                "nonempty": bool(draft.text.strip()),
+                "length": len(draft.text),
+            },
+            "draft_id": str(draft.id),
+            "source_bundle": draft.source_bundle,
+            "source_ids": [
+                str(v)
+                for k, v in draft.source_bundle.items()
+                if k.endswith("_id") and v
+            ],
+            "visual_ids": list(draft.visual_ids),
+        },
     )
     return result
 

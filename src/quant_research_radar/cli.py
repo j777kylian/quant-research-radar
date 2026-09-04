@@ -212,6 +212,9 @@ def main() -> None:
     publish.add_argument("--date", default=None)
     publish.add_argument("--database-url", default=None)
     publish.add_argument("--output-root", default="outputs/operations")
+    publish.add_argument(
+        "--json", action="store_true", help="emit machine-readable JSON"
+    )
     event_study = sub.add_parser("event-study")
     event_study.add_argument("action", choices=["run", "list", "show"])
     event_study.add_argument("--database-url", required=True)
@@ -291,33 +294,36 @@ def main() -> None:
                     )
                 )
             else:
-                print(
-                    json.dumps(
-                        [
-                            {
-                                "id": str(row.id),
-                                "date": row.logical_date,
-                                "recommendation": row.recommendation,
-                                "format": row.content_format,
-                                "selected": row.selected_candidate_id,
-                                "path": row.output_path,
-                            }
-                            for row in package_rows
-                        ],
-                        default=str,
-                        sort_keys=True,
-                    )
-                )
+                rows = [
+                    {
+                        "id": str(row.id),
+                        "date": row.logical_date.isoformat(),
+                        "recommendation": row.recommendation,
+                        "format": row.content_format,
+                        "selected": row.selected_candidate_id,
+                        "path": row.output_path,
+                    }
+                    for row in package_rows
+                ]
+                if args.json:
+                    print(json.dumps(rows, sort_keys=True))
+                else:
+                    for row in rows:
+                        print(
+                            f"{row['date']}  {row['recommendation']:<7}  {row['format']:<10}  {row['id']}"
+                        )
             return
         package = None
+        uuid_value = False
         if args.action == "show" and args.value:
             try:
                 package = session.get(
                     DailySocialEditorialPackage, uuid.UUID(args.value)
                 )
+                uuid_value = True
             except ValueError:
-                package = None
-        target_date = args.date or args.value
+                pass
+        target_date = args.date if uuid_value else (args.date or args.value)
         if package is None and not target_date:
             parser.error("publish daily/show/evaluate requires --date or value")
         try:
@@ -330,7 +336,9 @@ def main() -> None:
                     DailySocialEditorialPackage.logical_date == parsed_date
                 )
             )
-        if args.action == "evaluate" and package is None:
+        if args.action in {"daily", "evaluate"} and (
+            package is None or package.recommendation not in {"PUBLISH", "SKIP"}
+        ):
             daily = session.scalar(
                 select(DailyRun).where(
                     DailyRun.logical_date == date.fromisoformat(target_date)
@@ -340,6 +348,7 @@ def main() -> None:
                 parser.error("completed Daily required for historical evaluation")
             from .publication_ops import _persist_social_package
             from .publishing import (
+                classify_policy,
                 select_daily_candidates,
                 select_editorial_daily_candidate,
             )
@@ -350,14 +359,55 @@ def main() -> None:
                 session, daily_run_id=str(daily.id), logical_date=target_date
             )
             selected, editorial = select_editorial_daily_candidate(candidates)
+            draft = None
+            rejection = "no publishable candidate"
+            if selected is not None:
+                from .publishing import create_draft
+
+                empirical = dict(selected.evidence)
+                has_study = bool(empirical.get("event_study_result_id"))
+                if has_study:
+                    empirical.setdefault("disposition", "INCONCLUSIVE")
+                draft, rejection_value = create_draft(
+                    session,
+                    selected,
+                    empirical=empirical,
+                    structured_numbers={"0": 0.0} if has_study else {},
+                    language=settings.publication_language,
+                )
+                rejection = rejection_value or "copy verification failed"
+            recommendation = (
+                "PUBLISH" if draft is not None and draft.text.strip() else "SKIP"
+            )
             _persist_social_package(
                 session,
                 daily,
                 candidates,
                 selected,
-                "EVALUATE",
-                editorial.get("reason", "historical evaluation"),
+                recommendation,
+                editorial.get("reason", rejection or "historical evaluation"),
                 Path(args.output_root),
+                draft.text if draft else None,
+                {
+                    "policy": classify_policy(selected) if selected else None,
+                    "verification": {
+                        "status": "PASS" if draft else "FAIL",
+                        "reason": rejection,
+                    },
+                    "copy_quality": {"status": "PASS" if draft else "FAIL"},
+                    "draft_id": str(draft.id) if draft else None,
+                    "source_bundle": draft.source_bundle if draft else {},
+                    "score": selected.publication_value if selected else None,
+                    "selected": {"id": str(selected.id), "title": selected.title}
+                    if selected
+                    else {},
+                    "source_ids": [
+                        str(v)
+                        for k, v in (draft.source_bundle if draft else {}).items()
+                        if k.endswith("_id") and v
+                    ],
+                    "visual_ids": list(draft.visual_ids) if draft else [],
+                },
             )
             package = session.scalar(
                 select(DailySocialEditorialPackage).where(
@@ -366,23 +416,25 @@ def main() -> None:
             )
         if package is None:
             parser.error("no social package for date")
-        print(
-            json.dumps(
-                {
-                    "id": str(package.id),
-                    "date": package.logical_date,
-                    "recommendation": package.recommendation,
-                    "format": package.content_format,
-                    "reason": package.selection_reason,
-                    "candidates": package.candidates,
-                    "draft": package.draft_text,
-                    "path": package.output_path,
-                },
-                default=str,
-                indent=2,
-                sort_keys=True,
-            )
-        )
+        output = {
+            "id": str(package.id),
+            "date": package.logical_date,
+            "recommendation": package.recommendation,
+            "format": package.content_format,
+            "reason": package.selection_reason,
+            "candidates": package.candidates,
+            "draft": package.draft_text,
+            "path": package.output_path,
+        }
+        if args.json:
+            print(json.dumps(output, default=str, indent=2, sort_keys=True))
+        else:
+            print(f"{output['date']} — {output['recommendation']}")
+            print(f"Reason: {output['reason']}")
+            print(f"Package: {output['id']}")
+            draft_text = output["draft"]
+            if isinstance(draft_text, str) and draft_text:
+                print(f"Draft: {len(draft_text)} characters")
         return
     if args.command == "ops":
         from .operations import (
@@ -562,9 +614,9 @@ def main() -> None:
             ),
         )
         if args.audit_output:
-            output = Path(args.audit_output)
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text(
+            audit_path = Path(args.audit_output)
+            audit_path.parent.mkdir(parents=True, exist_ok=True)
+            audit_path.write_text(
                 json.dumps(
                     collection_result["coverage_audit"], indent=2, sort_keys=True
                 ),
@@ -579,7 +631,7 @@ def main() -> None:
         migrate_database(args.database_url)
         session = make_session_factory(make_engine(args.database_url))()
         if args.action == "list":
-            rows = session.scalars(
+            event_rows = session.scalars(
                 select(EventStudyResultRecord).order_by(
                     EventStudyResultRecord.created_at
                 )
@@ -595,7 +647,7 @@ def main() -> None:
                             "disposition": row.disposition,
                             "created_at": row.created_at,
                         }
-                        for row in rows
+                        for row in event_rows
                     ],
                     default=str,
                     sort_keys=True,

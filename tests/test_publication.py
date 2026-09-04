@@ -665,8 +665,17 @@ def test_after_daily_paper_day_drafts_instead_of_rejecting(tmp_path: Path) -> No
     draft = s.scalars(select(PublicationDraft)).one()
     assert "On the persistence of funding regimes" in draft.text
     package = s.scalars(select(DailySocialEditorialPackage)).one()
-    assert package.recommendation == "DRAFT_ONLY"
-    assert package.output_path is not None
+    assert package.recommendation == "PUBLISH"
+    package_dir = tmp_path / "social" / "2026-01-02"
+    assert {p.name for p in package_dir.iterdir()} >= {
+        "summary.json",
+        "editorial.md",
+        "sources.json",
+        "draft.md",
+    }
+    summary = __import__("json").loads((package_dir / "summary.json").read_text())
+    assert summary["recommendation"] == "PUBLISH"
+    assert summary["verification"]["status"] == "PASS"
 
 
 def test_paper_explainer_copy_keeps_source_lineage() -> None:
@@ -743,10 +752,45 @@ def test_publication_requires_completed_daily_run() -> None:
     assert run_ids_complete(s, str(running.id)) is True
 
 
-def test_social_package_failure_isolated_from_research(tmp_path: Path) -> None:
+def test_terminal_skip_writes_complete_artifact_set(tmp_path: Path) -> None:
     s = _session()
     daily = DailyRun(
         logical_date=__import__("datetime").date(2026, 9, 3),
+        status="SUCCESS",
+        code_sha="s",
+    )
+    s.add(daily)
+    s.commit()
+    assert _persist_social_package(s, daily, [], None, "SKIP", "NO_CANDIDATE", tmp_path)
+    package_dir = tmp_path / "social" / "2026-09-03"
+    assert {p.name for p in package_dir.iterdir()} == {
+        "summary.json",
+        "editorial.md",
+        "sources.json",
+    }
+    summary = __import__("json").loads((package_dir / "summary.json").read_text())
+    assert summary["recommendation"] == "SKIP"
+    assert summary["skip_reason"] == "NO_CANDIDATE"
+
+
+def test_terminal_package_rejects_evaluate(tmp_path: Path) -> None:
+    s = _session()
+    daily = DailyRun(
+        logical_date=__import__("datetime").date(2026, 9, 4),
+        status="SUCCESS",
+        code_sha="s",
+    )
+    s.add(daily)
+    s.commit()
+    assert not _persist_social_package(
+        s, daily, [], None, "EVALUATE", "legacy", tmp_path
+    )
+
+
+def test_social_package_failure_isolated_from_research(tmp_path: Path) -> None:
+    s = _session()
+    daily = DailyRun(
+        logical_date=__import__("datetime").date(2026, 9, 5),
         status="SUCCESS",
         code_sha="s",
     )

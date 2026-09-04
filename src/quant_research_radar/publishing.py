@@ -101,6 +101,23 @@ def publication_value_score(components: dict[str, int]) -> dict[str, Any]:
     visualizable = components.get("visualizable", 0)
     source_quality = components.get("source_quality", 0)
     explainable = components.get("explainable", 0)
+    extra = {
+        key: components.get(key, 0)
+        for key in (
+            "domain_relevance",
+            "active_topic_relevance",
+            "user_research_relevance",
+            "information_gain",
+            "specific_takeaway_strength",
+            "methodological_value",
+            "negative_result_value",
+            "source_depth",
+            "topic_diversity",
+            "public_interest",
+            "evidence_quality",
+            "visualizability",
+        )
+    }
     total = (
         clarity
         + novelty
@@ -109,6 +126,7 @@ def publication_value_score(components: dict[str, int]) -> dict[str, Any]:
         + visualizable
         + source_quality
         + explainable
+        + sum(extra.values())
     )
     return {
         "components": {
@@ -119,6 +137,7 @@ def publication_value_score(components: dict[str, int]) -> dict[str, Any]:
             "visualizable": visualizable,
             "source_quality": source_quality,
             "explainable_without_exaggeration": explainable,
+            **extra,
         },
         "total": total,
     }
@@ -270,19 +289,82 @@ def select_daily_candidates(
         draft.text[:500].lower()
         for draft in session.scalars(select(PublicationDraft)).all()
     ]
+
+    def paper_components(paper: Any) -> dict[str, int]:
+        text = " ".join(
+            [
+                paper.title or "",
+                paper.raw_text or "",
+                str((paper.raw_metadata or {}).get("abstract", "")),
+            ]
+        ).lower()
+        domain_terms = (
+            "quant",
+            "finance",
+            "return",
+            "volatility",
+            "trading",
+            "portfolio",
+            "market",
+        )
+        active_terms = (
+            "funding",
+            "defi",
+            "option",
+            "microstructure",
+            "crypto",
+            "perpetual",
+            "token",
+        )
+        domain = min(5, sum(term in text for term in domain_terms))
+        active = min(5, sum(term in text for term in active_terms))
+        depth = (
+            5
+            if paper.raw_text
+            else 3
+            if (paper.raw_metadata or {}).get("abstract")
+            else 1
+        )
+        specificity = (
+            4 if paper.raw_text and len(paper.raw_text) > 300 else 2 if depth > 1 else 0
+        )
+        method = min(
+            4,
+            sum(
+                term in text
+                for term in ("method", "empirical", "dataset", "experiment")
+            ),
+        )
+        return {
+            "domain_relevance": domain,
+            "active_topic_relevance": active,
+            "user_research_relevance": min(5, domain + active),
+            "information_gain": min(4, 1 + active),
+            "specific_takeaway_strength": specificity,
+            "methodological_value": method,
+            "source_depth": depth,
+            "evidence_quality": depth,
+            "public_interest": min(3, domain),
+            "visualizability": 2
+            if any(term in text for term in ("result", "return", "volatility"))
+            else 0,
+            "topic_diversity": 1,
+        }
+
     for paper in papers:
         title_key = (paper.title or "").lower()
         if any(title_key and title_key in text for text in existing_texts):
             continue
         value = publication_value_score(
             {
-                "clarity": 4,
-                "novelty": 3,
-                "educational": 4,
+                "clarity": 2,
+                "novelty": 2,
+                "educational": 2,
                 "timeliness": 2,
-                "visualizable": 2,
-                "source_quality": 4,
-                "explainable": 4,
+                "visualizable": 0,
+                "source_quality": 2,
+                "explainable": 2,
+                **paper_components(paper),
             }
         )
         candidates.append(
@@ -372,11 +454,22 @@ def select_editorial_daily_candidate(
     ]
     if not publishable:
         return None, {"reason": "no publishable candidate in pool"}
-    best = max(
-        publishable,
-        key=lambda candidate: (candidate.publication_value or {}).get("total", 0),
-    )
-    return best, {"reason": "highest publication value"}
+
+    def tie_key(candidate: PublicationCandidate) -> tuple[Any, ...]:
+        components = (candidate.publication_value or {}).get("components", {})
+        return (
+            -int((candidate.publication_value or {}).get("total", 0)),
+            -int(components.get("active_topic_relevance", 0)),
+            -int(components.get("specific_takeaway_strength", 0)),
+            -int(components.get("source_depth", 0)),
+            candidate.title.lower(),
+        )
+
+    best = sorted(publishable, key=tie_key)[0]
+    total = (best.publication_value or {}).get("total", 0)
+    return best, {
+        "reason": f"highest publication value after relevance/evidence tie-break (score {total})"
+    }
 
 
 def select_weekly_candidates(
@@ -609,13 +702,14 @@ def generate_public_copy(
         )
     elif category in {REQUEST_DATA_FINDING, HYPOTHESIS_EXPLAINER}:
         body = (
-            f"Research hypothesis: {title}\n\n"
-            f"{summary}\n\n"
-            "Interpretation: this is an unvalidated hypothesis — the evidence is "
-            "not sufficient yet. Critics requested additional independent evidence "
-            "or methodological definition before any test.\n\n"
-            "Limitation: single-channel and/or metadata-only support; not a trading "
-            "signal.\n\n"
+            f"A question worth testing: {title}\n\n"
+            f"What we observed: {summary}\n\n"
+            "Why it matters: this is a concrete research question, not a claim that "
+            "the relationship is real. Critics requested additional independent "
+            "evidence or methodological definition before any test; the evidence is not "
+            "sufficient yet.\n\n"
+            "Limitation: the current evidence is unvalidated and may be single-channel "
+            "or metadata-only; this is not a trading signal.\n\n"
             "Source: Quant Research Radar research registry."
         )
     elif category == RESEARCH_PROCESS_NOTE:
