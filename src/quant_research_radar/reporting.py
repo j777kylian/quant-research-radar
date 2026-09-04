@@ -24,6 +24,7 @@ from .db import (
     CollectionRun,
     DailyRun,
     EventStudyResultRecord,
+    TopicBrief,
     WeeklyRun,
     utcnow,
 )
@@ -179,6 +180,20 @@ def collect_daily_snapshot(
         h for h in hypotheses if low_frequency_fit(h.horizon) == FIT_OUT_OF_SCOPE
     ]
 
+    topic_briefs = [
+        {
+            "id": str(topic.id),
+            "topic_id": topic.topic_id,
+            "title": topic.human_title,
+            "brief": topic.brief,
+        }
+        for topic in session.scalars(
+            select(TopicBrief)
+            .where(TopicBrief.source_run_id == str(daily.id))
+            .order_by(TopicBrief.human_title)
+        ).all()
+    ]
+
     snapshot = {
         "logical_date": daily.logical_date.isoformat(),
         "final_status": daily.status,
@@ -216,6 +231,7 @@ def collect_daily_snapshot(
         "failure_reasons": list(daily.failure_reasons or []),
         "report_path": daily.report_path,
         "prior_empirical": prior_empirical_for_families(session, all_families),
+        "topic_briefs": topic_briefs,
     }
     _humanize(snapshot, session, daily, hypotheses, audit)
     return snapshot
@@ -524,7 +540,26 @@ def render_daily_markdown(summary: dict[str, Any]) -> str:
         "",
         "## Topic Briefs",
     ]
-    if findings:
+    topic_briefs = summary.get("topic_briefs", [])
+    if topic_briefs:
+        for topic in topic_briefs[:4]:
+            brief = topic.get("brief", {})
+            lines.append(f"### {topic.get('title')}")
+            for label, key in (
+                ("Background", "background"),
+                ("Question", "research_question"),
+                ("Today's change", "what_changed_today"),
+                ("Method", "methods"),
+                ("Result", "results"),
+                ("Interpretation", "interpretation"),
+                ("Recommendation", "recommendation"),
+                ("Next action", "next_action"),
+            ):
+                if brief.get(key):
+                    lines.append(f"- **{label}:** {brief[key]}")
+            if brief.get("horizon_endpoints"):
+                lines.append(f"- **Horizon endpoints:** {brief['horizon_endpoints']}")
+    elif findings:
         for finding in findings[:5]:
             lines.append(f"### {finding.get('title')}")
             lines.append(f"- **Research question:** {finding.get('question')}")
@@ -544,9 +579,9 @@ def render_daily_markdown(summary: dict[str, Any]) -> str:
                     f"{e.get('value')}{e.get('unit')} → {e.get('fit')}"
                     for e in endpoints
                 )
-                lines.append(f"  - Horizon endpoints: {fit_text}")
-            lines.append(f"  - Limitation: {finding.get('limitation')}")
-            lines.append(f"  - Next: {finding.get('next')}")
+                lines.append(f"- **Horizon endpoints:** {fit_text}")
+            lines.append(f"- **Limitation:** {finding.get('limitation')}")
+            lines.append(f"- **Next:** {finding.get('next')}")
     elif research.get("channel_hypotheses", 0):
         lines.append(
             "- No new family today; recurrent hypotheses remain under monitoring."

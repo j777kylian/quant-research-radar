@@ -357,6 +357,11 @@ def run_daily(
     # THEN render the canonical final report from persisted state (never RUNNING).
     from .reporting import collect_daily_snapshot, render_daily_markdown
 
+    # Deterministic synthesis is downstream of final scientific state but
+    # upstream of the first user-facing report.
+    from .synthesis import synthesize_daily_topics
+
+    synthesize_daily_topics(session, record.id)
     snapshot = collect_daily_snapshot(
         session, record.id, intelligence_root=daily_root / "intelligence"
     )
