@@ -29,6 +29,7 @@ from quant_research_radar.publishing import (
     PUBLIC_WITH_LIMITATIONS,
     classify_policy,
     create_draft,
+    evaluate_editorial_candidates,
     find_recent_duplicate,
     generate_public_copy,
     publication_value_score,
@@ -870,7 +871,9 @@ def test_short_copy_is_not_thread() -> None:
     assert select_content_format("One concrete result.") == "SHORT_POST"
 
 
-def test_cli_historical_evaluation_uses_fallback_pipeline(monkeypatch, capsys) -> None:
+def test_cli_historical_evaluation_uses_fallback_pipeline(
+    monkeypatch, capsys, tmp_path
+) -> None:
     """The public CLI must use the same ranked quality pipeline as after_daily."""
     import sys
     from datetime import date
@@ -903,11 +906,49 @@ def test_cli_historical_evaluation_uses_fallback_pipeline(monkeypatch, capsys) -
         "quant_research_radar.publishing.evaluate_editorial_candidates", fake_evaluate
     )
     monkeypatch.setattr(
-        sys, "argv", ["quant-radar", "publish", "evaluate", "--date", "2026-09-03"]
+        sys,
+        "argv",
+        [
+            "quant-radar",
+            "publish",
+            "evaluate",
+            "--date",
+            "2026-09-03",
+            "--output-root",
+            str(tmp_path),
+        ],
     )
     cli_module.main()
     assert calls["evaluate"] == 1
+    assert (tmp_path / "social" / "2026-09-03").exists()
     assert "SKIP" in capsys.readouterr().out
+
+
+def test_editorial_evaluation_retains_failed_attempts_after_first_pass(monkeypatch):
+    session = _session()
+    first = _candidate("run")
+    first.title = "A stronger finding"
+    second = _candidate("run", category="PAPER_EXPLAINER")
+    second.title = "A weak paper"
+    first.publication_value = {"total": 20, "components": {}}
+    second.publication_value = {"total": 10, "components": {}}
+    passed = PublicationDraft(candidate_id=None, text="A useful draft")
+
+    def fake_create(*args, **kwargs):
+        candidate = args[1]
+        return (
+            (passed, None)
+            if candidate is first
+            else (None, "SOURCE_DEPTH_TOO_SHALLOW: insufficient source")
+        )
+
+    monkeypatch.setattr("quant_research_radar.publishing.create_draft", fake_create)
+    result = evaluate_editorial_candidates(session, [first, second])
+    assert result["selected"] is first
+    assert [entry["rejection_code"] for entry in result["rejections"]] == [
+        None,
+        "SOURCE_DEPTH_TOO_SHALLOW",
+    ]
 
 
 def test_verification_failure_cannot_report_pass() -> None:

@@ -1123,6 +1123,8 @@ def evaluate_editorial_candidates(
 
     history: list[dict[str, Any]] = []
     ordered = sorted(candidates, key=rank)
+    selected: PublicationCandidate | None = None
+    selected_draft: PublicationDraft | None = None
     for position, candidate in enumerate(ordered, 1):
         draft, rejection = create_draft(
             session,
@@ -1155,9 +1157,10 @@ def evaluate_editorial_candidates(
             "reason": rejection,
         }
         history.append(entry)
-        if draft:
-            return {"selected": candidate, "draft": draft, "rejections": history}
-    return {"selected": None, "draft": None, "rejections": history}
+        if draft and selected is None:
+            selected = candidate
+            selected_draft = draft
+    return {"selected": selected, "draft": selected_draft, "rejections": history}
 
 
 def register_publication(
